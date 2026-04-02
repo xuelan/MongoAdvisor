@@ -57,6 +57,20 @@ src/
     └── clusters.js    # Cluster CRUD endpoints
 ```
 
+## Workload Generation
+
+Scripts in `scripts/` generate some testing load against sample datasets for testing and populating server usage statistics.
+
+```bash
+node scripts/workload.js          # Run all workloads in parallel (3 scripts x 10 iterations)
+node scripts/workload-agg.js      # Airbnb 10-stage analytics (lookup, map, group)
+node scripts/workload-agg2.js     # Airbnb seasonal pricing (unwind reviews, double group)
+node scripts/workload-mflix.js    # Mflix 3 pipelines (actor collab, genre evolution, director career)
+node scripts/workload-mflix.js 2  # Run a single mflix pipeline by number
+```
+
+Each script sets `appName` and `comment` on its connections/queries for traceability in Atlas logs and `db.currentOp()`.
+
 ## Security — Credential Encryption
 
 Source cluster connection strings contain sensitive credentials. They are **encrypted at rest** before being stored in the backend MongoDB database.
