@@ -1,0 +1,21 @@
+{
+  "name": "mongomonitor",
+  "version": "0.1.0",
+  "description": "Observability tool for MongoDB clusters",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [
+    "mongodb",
+    "monitoring",
+    "observability"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1",
+    "mongodb": "^7.1.1"
+  }
+}
