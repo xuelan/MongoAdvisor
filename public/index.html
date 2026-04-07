@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MongoMonitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@3"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="dot" id="statusDot"></div>
+    <h1>MongoMonitor</h1>
+    <span class="badge" id="mongoStatus">checking…</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Monitored Clusters</h2>
+      <form class="add-cluster" id="addForm">
+        <input name="name" placeholder="Cluster name" required>
+        <input name="region" placeholder="Region (optional)">
+        <input name="uri" class="full" placeholder="Connection string (mongodb+srv://…)" required>
+        <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
+        <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
+        <input name="atlasPrivateKey" class="full" placeholder="Atlas Private API Key (optional)" type="password">
+        <div><button type="submit" class="btn">Add Cluster</button></div>
+      </form>
+      <ul class="cluster-list" id="clusterList">
+        <li class="empty">Loading…</li>
+      </ul>
+    </section>
+
+    <section class="card filter-bar">
+      <h2>Filters</h2>
+      <div class="filter-row">
+        <div class="filter-group">
+          <label>Time range</label>
+          <div class="time-range-btns" id="timeRangeGroup">
+            <button class="btn-filter" data-val="300000">5 min</button>
+            <button class="btn-filter active" data-val="3600000">1 hour</button>
+            <button class="btn-filter" data-val="86400000">1 day</button>
+            <button class="btn-filter" data-val="604800000">1 week</button>
+            <button class="btn-filter" data-val="">All</button>
+          </div>
+          <select id="timeRange" style="display:none"><option value="3600000" selected></option></select>
+        </div>
+      </div>
+      <div class="filter-group" style="margin-top: 0.75rem;">
+        <label>Nodes</label>
+        <div class="ns-filter-actions">
+          <button class="btn-filter" onclick="hostSelectAll()">Select all</button>
+          <button class="btn-filter" onclick="hostSelectNone()">Select none</button>
+        </div>
+        <div class="ns-checkboxes" id="hostFilter"></div>
+      </div>
+      <div class="filter-group" style="margin-top: 0.75rem;">
+        <label>Namespaces</label>
+        <div class="ns-filter-actions">
+          <button class="btn-filter" onclick="nsSelectAll()">Select all</button>
+          <button class="btn-filter" onclick="nsSelectNone()">Select none</button>
+        </div>
+        <div class="ns-checkboxes" id="nsFilter"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Execution Count by appName</h2>
+      <canvas id="appLoadExecChart"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>Total Execution Time by appName</h2>
+      <canvas id="appLoadTimeChart"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>Slowest Queries by appName</h2>
+      <canvas id="slowestAppChart"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>Query Stats Timeline</h2>
+      <canvas id="queryStatsTimeline"></canvas>
+    </section>
+
+    <div class="grid-2">
+      <section class="card">
+        <h2>IO Heatmap <span class="subtitle">size = slow query count, color = bytes read</span></h2>
+        <div class="treemap-legend">
+          <span class="tm-leg-label">Low IO</span>
+          <span class="tm-leg-bar tm-bar-io"></span>
+          <span class="tm-leg-label">High IO</span>
+        </div>
+        <div class="treemap-wrap">
+          <canvas id="treemapIO"></canvas>
+        </div>
+      </section>
+      <section class="card">
+        <h2>CPU Heatmap <span class="subtitle">size = slow query count, color = cpuNanos</span></h2>
+        <div class="treemap-legend">
+          <span class="tm-leg-label">Low CPU</span>
+          <span class="tm-leg-bar tm-bar-cpu"></span>
+          <span class="tm-leg-label">High CPU</span>
+        </div>
+        <div class="treemap-wrap">
+          <canvas id="treemapCPU"></canvas>
+        </div>
+      </section>
+    </div>
+
+    <section class="card" id="slowQuerySection" style="display:none">
+      <h2>Slow Queries (Atlas Logs API)</h2>
+      <div id="slowQueryList" class="slow-query-list"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

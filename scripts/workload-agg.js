@@ -1,7 +1,7 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const { MongoClient } = require("mongodb");
 
-const APP_NAME = "workload-agg";
+const APP_NAME = "workload-a";
 const COMMENT = "Airbnb 10-stage analytics: match, lookup host listings, map reviews, group by country/type/tier";
 
 const baseUri = process.env.MONGO_URI;
@@ -9,14 +9,24 @@ if (!baseUri) {
   console.error("MONGO_URI is not set in .env");
   process.exit(1);
 }
-const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}`;
+const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);
+const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}&readPreference=${readPref}`;
+
+function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+const minReviews = rand(1, 20);
+const minBedrooms = rand(0, 3);
+const reviewSlice = rand(5, 30);
+const limitN = rand(20, 100);
+const sortField = pick(["total_listings", "avg_value_score", "avg_price", "avg_rating"]);
+const priceTiers = [rand(30, 70), rand(100, 200), rand(200, 400)].sort((a, b) => a - b);
 
 const pipeline = [
-  // Stage 1 (fast): filter listings with reviews and reasonable price
   {
     $match: {
-      number_of_reviews: { $gte: 5 },
-      bedrooms: { $gte: 1 },
+      number_of_reviews: { $gte: minReviews },
+      bedrooms: { $gte: minBedrooms },
       "address.country": { $exists: true },
     },
   },
@@ -36,7 +46,7 @@ const pipeline = [
     $addFields: {
       review_summary: {
         $map: {
-          input: { $slice: ["$reviews", 20] },
+          input: { $slice: ["$reviews", reviewSlice] },
           as: "r",
           in: {
             reviewer: "$$r.reviewer_name",
@@ -93,9 +103,9 @@ const pipeline = [
       price_tier: {
         $switch: {
           branches: [
-            { case: { $lte: ["$price_numeric", 50] }, then: "budget" },
-            { case: { $lte: ["$price_numeric", 150] }, then: "mid-range" },
-            { case: { $lte: ["$price_numeric", 300] }, then: "premium" },
+            { case: { $lte: ["$price_numeric", priceTiers[0]] }, then: "budget" },
+            { case: { $lte: ["$price_numeric", priceTiers[1]] }, then: "mid-range" },
+            { case: { $lte: ["$price_numeric", priceTiers[2]] }, then: "premium" },
           ],
           default: "luxury",
         },
@@ -157,11 +167,9 @@ const pipeline = [
     },
   },
 
-  // Stage 9 (medium): $sort — by total listings descending
-  { $sort: { total_listings: -1, avg_value_score: -1 } },
+  { $sort: { [sortField]: -1 } },
 
-  // Stage 10 (fast): $limit — top 50 segments
-  { $limit: 50 },
+  { $limit: limitN },
 ];
 
 async function main() {
@@ -175,7 +183,7 @@ async function main() {
     await client.connect();
     const db = client.db("sample_airbnb");
 
-    console.log("Running 10-stage aggregation on listingsAndReviews_big (55k docs)…\n");
+    console.log(`Running 10-stage aggregation (reviews>=${minReviews}, beds>=${minBedrooms}, tiers=${priceTiers}, sort=${sortField}, limit=${limitN})…\n`);
     const start = Date.now();
 
     const results = await db

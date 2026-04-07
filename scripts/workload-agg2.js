@@ -1,7 +1,7 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const { MongoClient } = require("mongodb");
 
-const APP_NAME = "workload-agg";
+const APP_NAME = "workload-b";
 const COMMENT = "Airbnb seasonal pricing: unwind reviews, bucket by month, facet top/bottom markets";
 
 const baseUri = process.env.MONGO_URI;
@@ -9,10 +9,16 @@ if (!baseUri) {
   console.error("MONGO_URI is not set in .env");
   process.exit(1);
 }
-const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}`;
+const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);
+const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}&readPreference=${readPref}`;
+
+function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+const limitN = rand(15, 60);
+const sortField = pick(["total_reviews", "avg_price", "demand_density", "total_listings"]);
 
 const pipeline = [
-  // Stage 1 (fast): filter listings with reviews and price data
   {
     $match: {
       reviews: { $exists: true, $ne: [] },
@@ -134,11 +140,9 @@ const pipeline = [
     },
   },
 
-  // Stage 9 (medium): $sort — hottest markets first
-  { $sort: { total_reviews: -1 } },
+  { $sort: { [sortField]: -1 } },
 
-  // Stage 10 (fast): $limit
-  { $limit: 40 },
+  { $limit: limitN },
 ];
 
 async function main() {
@@ -152,7 +156,7 @@ async function main() {
     await client.connect();
     const db = client.db("sample_airbnb");
 
-    console.log("Running seasonal pricing aggregation on listingsAndReviews_big…\n");
+    console.log(`Running seasonal pricing aggregation (sort=${sortField}, limit=${limitN})…\n`);
     const start = Date.now();
 
     const results = await db
