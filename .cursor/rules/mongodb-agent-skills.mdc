@@ -1,0 +1,20 @@
+---
+description: Enforce MongoDB Agent Skills for all MongoDB-related work
+alwaysApply: true
+---
+
+# MongoDB Agent Skills — Mandatory Usage
+
+When performing ANY MongoDB-related work, you MUST read and follow the appropriate MongoDB Agent Skill BEFORE writing code. Never skip this step.
+
+## Required Workflow
+
+1. **Identify** which skill applies (use the table above).
+2. **Read** the full SKILL.md file for that skill.
+3. **Follow** every step it prescribes (e.g. fetch schema, check indexes via MCP before generating a query).
+4. **Write** the code only after completing the skill's workflow.
+
+If multiple skills apply (e.g. designing a schema AND writing queries for it), follow each skill in sequence.
+
+## MCP Server
+This project has the MongoDB MCP Server configured. Use it for any database interaction with MongoDB

@@ -15,6 +15,10 @@
     <span class="badge" id="mongoStatus">checking…</span>
   </header>
 
+  <div id="dbUnavailableBanner" class="db-unavailable-banner" role="alert" aria-live="polite" hidden>
+    <p id="dbUnavailableText"></p>
+  </div>
+
   <main>
     <section class="card">
       <h2>Monitored Clusters</h2>
@@ -65,29 +69,88 @@
       </div>
     </section>
 
+    <div class="grid-2">
+      <section class="card" id="diskUsageSection">
+        <div class="card-header-row">
+          <h2>Disk Usage</h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn" id="diskInfoBtn">i</button>
+            <div class="info-tooltip" id="diskInfoTooltip">
+              Your disk usage is above 70%. Please consider scaling your storage size.
+              <a href="https://www.mongodb.com/docs/atlas/customize-storage/#std-label-create-cluster-storage" target="_blank" rel="noopener">Learn more</a>
+            </div>
+          </div>
+        </div>
+        <div id="diskUsageContent" class="disk-usage-content">Loading…</div>
+      </section>
+
+      <section class="card" id="oplogSection">
+        <div class="card-header-row">
+          <h2>Oplog Window</h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn" id="oplogInfoBtn">i</button>
+            <div class="info-tooltip" id="oplogInfoTooltip"></div>
+          </div>
+        </div>
+        <div id="oplogContent" class="disk-usage-content">Loading…</div>
+      </section>
+    </div>
+
     <section class="card">
-      <h2>Execution Count by appName</h2>
+      <div class="card-header-row">
+        <h2>Execution Count by AppName <span class="subtitle">top 20</span></h2>
+        <div class="info-btn-wrap">
+          <button class="info-btn visible">i</button>
+          <div class="info-tooltip">Source is $queryStats, it collects and reports metrics for aggregate(), find(), and distinct() queries. Does not collect information for queries that use Queryable Encryption. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">More info</a></div>
+        </div>
+      </div>
       <canvas id="appLoadExecChart"></canvas>
     </section>
 
     <section class="card">
-      <h2>Total Execution Time by appName</h2>
+      <div class="card-header-row">
+        <h2>Total Execution Time by AppName <span class="subtitle">top 20</span></h2>
+        <div class="info-btn-wrap">
+          <button class="info-btn visible">i</button>
+          <div class="info-tooltip">Source is $queryStats, it collects and reports metrics for aggregate(), find(), and distinct() queries. Does not collect information for queries that use Queryable Encryption. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">More info</a></div>
+        </div>
+      </div>
       <canvas id="appLoadTimeChart"></canvas>
     </section>
 
     <section class="card">
-      <h2>Slowest Queries by appName</h2>
+      <div class="card-header-row">
+        <h2>Slowest Queries by AppName <span class="subtitle">top 20</span></h2>
+        <div class="info-btn-wrap">
+          <button class="info-btn visible">i</button>
+          <div class="info-tooltip">Source is $queryStats, it collects and reports metrics for aggregate(), find(), and distinct() queries. Does not collect information for queries that use Queryable Encryption. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">More info</a></div>
+        </div>
+      </div>
       <canvas id="slowestAppChart"></canvas>
     </section>
 
     <section class="card">
-      <h2>Query Stats Timeline</h2>
-      <canvas id="queryStatsTimeline"></canvas>
+      <div class="card-header-row">
+        <h2>Slowest Query Impact Bubble <span class="subtitle">top 20 AppName + Comment — x = exec count, y = avg latency, size = total time</span></h2>
+        <div class="info-btn-wrap">
+          <button class="info-btn visible">i</button>
+          <div class="info-tooltip">Source is Query Profiler of Atlas. Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a></div>
+        </div>
+      </div>
+      <div class="bubble-wrap">
+        <canvas id="bubbleChart"></canvas>
+      </div>
     </section>
 
     <div class="grid-2">
       <section class="card">
-        <h2>IO Heatmap <span class="subtitle">size = slow query count, color = bytes read</span></h2>
+        <div class="card-header-row">
+          <h2>IO Heatmap by AppName<br><span class="subtitle">Top 20 — size = count, color = bytes read</span></h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn visible">i</button>
+            <div class="info-tooltip">Source is Query Profiler of Atlas. Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a><br><br><code>storage.data.bytesRead</code> — Number of bytes read by the operation from the disk to the cache. <a href="https://www.mongodb.com/docs/manual/reference/database-profiler/#mongodb-data-system.profile.storage.data.bytesRead" target="_blank" rel="noopener">More info</a></div>
+          </div>
+        </div>
         <div class="treemap-legend">
           <span class="tm-leg-label">Low IO</span>
           <span class="tm-leg-bar tm-bar-io"></span>
@@ -98,7 +161,13 @@
         </div>
       </section>
       <section class="card">
-        <h2>CPU Heatmap <span class="subtitle">size = slow query count, color = cpuNanos</span></h2>
+        <div class="card-header-row">
+          <h2>CPU Heatmap by AppName<br><span class="subtitle">Top 20 — size = count, color = cpuNanos</span></h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn visible">i</button>
+            <div class="info-tooltip">Source is Query Profiler of Atlas. Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a><br><br><code>cpuNanos</code> — The total CPU time spent by a query operation in nanoseconds. This field is only available on Linux systems. <a href="https://www.mongodb.com/docs/manual/reference/database-profiler/#mongodb-data-system.profile.cpuNanos" target="_blank" rel="noopener">More info</a></div>
+          </div>
+        </div>
         <div class="treemap-legend">
           <span class="tm-leg-label">Low CPU</span>
           <span class="tm-leg-bar tm-bar-cpu"></span>
@@ -110,10 +179,65 @@
       </section>
     </div>
 
-    <section class="card" id="slowQuerySection" style="display:none">
-      <h2>Slow Queries (Atlas Logs API)</h2>
-      <div id="slowQueryList" class="slow-query-list"></div>
+    <div class="grid-2">
+      <section class="card" id="unusedIndexSection">
+        <div class="card-header-row">
+          <h2>Unused Indexes <span class="subtitle">source: $indexStats — 0 ops since last server start</span></h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn visible">i</button>
+            <div class="info-tooltip info-tooltip-wide">
+              <strong>Explanation</strong><br>
+              Creating unnecessary indexes leads to a bloated collection and slow writes. Consider each query your application performs and whether it justifies an index. Remove indexes that are unused, either because the field is not used to query the database or because the index is redundant.<br><br>
+              <strong>Recommended Actions</strong><br>
+              1. Double check all application code to confirm the index pattern is not used in any operations.<br>
+              2. <a href="https://www.mongodb.com/docs/manual/core/index-hidden/" target="_blank" rel="noopener">Hide these unused indexes</a> to test impact without dropping them.<br>
+              3. After one full business cycle, drop the index.
+            </div>
+          </div>
+        </div>
+        <div id="unusedIndexList" class="index-list"></div>
+      </section>
+      <section class="card" id="redundantIndexSection">
+        <div class="card-header-row">
+          <h2>Redundant Indexes <span class="subtitle">source: $indexStats</span></h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn visible">i</button>
+            <div class="info-tooltip info-tooltip-wide">
+              <strong>Explanation</strong><br>
+              Creating unnecessary indexes leads to a bloated collection and slow writes. Consider each query your application performs and whether it justifies an index. Remove indexes that are unused, either because the field is not used to query the database or because the index is redundant.<br><br>
+              <strong>Recommended Actions</strong><br>
+              Double check in the application code which index is really used and drop the redundant ones.
+            </div>
+          </div>
+        </div>
+        <div id="redundantIndexList" class="index-list"></div>
+      </section>
+    </div>
+
+    <section class="card" id="storageSection">
+      <h2>Storage & Fragmentation <span class="subtitle">per collection — daily scan — source: collStats</span></h2>
+      <div class="storage-table-wrap">
+        <table class="storage-table" id="storageTable">
+          <thead>
+            <tr>
+              <th data-sort="namespace">Collection</th>
+              <th data-sort="docCount">Docs</th>
+              <th data-sort="dataSizeBytes">Data Size</th>
+              <th data-sort="storageSizeBytes">Storage Size</th>
+              <th data-sort="collReusableBytes" class="th-highlight">Reusable</th>
+              <th data-sort="fragmentationPct" class="th-highlight">Frag %</th>
+              <th data-sort="totalIndexSizeBytes">Index Size</th>
+              <th data-sort="numIndexes">Indexes</th>
+              <th data-sort="indexToDataRatioPct">Idx/Data %</th>
+            </tr>
+          </thead>
+          <tbody id="storageBody"></tbody>
+        </table>
+      </div>
+      <div id="storagePager" class="storage-pager" style="display:none"></div>
+      <div id="storageEmpty" class="index-empty" style="display:none">No storage data yet — first scan runs at 3:00 AM or on startup</div>
     </section>
+
   </main>
 
   <script src="app.js"></script>

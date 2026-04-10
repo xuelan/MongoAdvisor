@@ -404,4 +404,168 @@ router.get("/heatmap", async (req, res, next) => {
   }
 });
 
+// GET /api/metrics/bubble — top 20 appName+comment from slow_queries for bubble chart
+router.get("/bubble", async (req, res, next) => {
+  try {
+    const matchStage = buildFilter(req.query);
+
+    const pipeline = [
+      { $match: matchStage },
+      {
+        $group: {
+          _id: { appName: "$appName", comment: "$comment" },
+          count: { $sum: 1 },
+          totalMillis: { $sum: "$millis" },
+          avgMillis: { $avg: "$millis" },
+          maxMillis: { $max: "$millis" },
+          totalCpuNanos: { $sum: { $ifNull: ["$cpuNanos", 0] } },
+          totalBytesRead: { $sum: { $ifNull: ["$bytesRead", 0] } },
+          totalDocsExamined: { $sum: "$docsExamined" },
+          totalKeysExamined: { $sum: "$keysExamined" },
+          namespaces: { $addToSet: "$namespace" },
+          planSummaries: { $addToSet: "$planSummary" },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          appName: "$_id.appName",
+          comment: "$_id.comment",
+          count: 1,
+          totalMillis: 1,
+          avgMillis: { $round: ["$avgMillis", 0] },
+          maxMillis: 1,
+          totalCpuMs: { $round: [{ $divide: ["$totalCpuNanos", 1e6] }, 1] },
+          totalBytesReadMB: { $round: [{ $divide: ["$totalBytesRead", 1048576] }, 2] },
+          totalDocsExamined: 1,
+          totalKeysExamined: 1,
+          namespaces: 1,
+          planSummaries: 1,
+        },
+      },
+      { $sort: { totalMillis: -1 } },
+      { $limit: 20 },
+    ];
+
+    const docs = await getDb().collection("slow_queries").aggregate(pipeline).toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/metrics/unused-indexes
+router.get("/unused-indexes", async (req, res, next) => {
+  try {
+    const filter = { type: "unused" };
+    if (req.query.host) {
+      const hosts = Array.isArray(req.query.host) ? req.query.host : [req.query.host];
+      filter.host = hosts.length === 1 ? hosts[0] : { $in: hosts };
+    }
+    if (req.query.namespace) {
+      const ns = Array.isArray(req.query.namespace) ? req.query.namespace : [req.query.namespace];
+      filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
+    }
+    const docs = await getDb()
+      .collection("index_stats")
+      .find(filter)
+      .sort({ namespace: 1, indexName: 1 })
+      .toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/metrics/redundant-indexes
+router.get("/redundant-indexes", async (req, res, next) => {
+  try {
+    const filter = { type: "redundant" };
+    if (req.query.host) {
+      const hosts = Array.isArray(req.query.host) ? req.query.host : [req.query.host];
+      filter.host = hosts.length === 1 ? hosts[0] : { $in: hosts };
+    }
+    if (req.query.namespace) {
+      const ns = Array.isArray(req.query.namespace) ? req.query.namespace : [req.query.namespace];
+      filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
+    }
+    const docs = await getDb()
+      .collection("index_stats")
+      .find(filter)
+      .sort({ namespace: 1, indexName: 1 })
+      .toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/metrics/storage — collection-level storage and fragmentation
+router.get("/storage", async (req, res, next) => {
+  try {
+    const filter = {};
+    if (req.query.namespace) {
+      const ns = Array.isArray(req.query.namespace) ? req.query.namespace : [req.query.namespace];
+      filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
+    }
+    const docs = await getDb()
+      .collection("storage_stats")
+      .find(filter)
+      .sort({ storageSizeBytes: -1 })
+      .toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/metrics/disk-usage — latest disk usage per cluster
+router.get("/disk-usage", async (_req, res, next) => {
+  try {
+    const docs = await getDb()
+      .collection("disk_usage")
+      .aggregate([
+        { $sort: { timestamp: -1 } },
+        { $group: {
+          _id: "$clusterId",
+          clusterName: { $first: "$clusterName" },
+          timestamp: { $first: "$timestamp" },
+          fsTotalSizeBytes: { $first: "$fsTotalSizeBytes" },
+          fsUsedSizeBytes: { $first: "$fsUsedSizeBytes" },
+          fsFreeBytes: { $first: "$fsFreeBytes" },
+          usagePct: { $first: "$usagePct" },
+        }},
+        { $project: { _id: 0, clusterName: 1, timestamp: 1, fsTotalSizeBytes: 1, fsUsedSizeBytes: 1, fsFreeBytes: 1, usagePct: 1 } },
+      ])
+      .toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/metrics/oplog-window — latest oplog window per cluster
+router.get("/oplog-window", async (_req, res, next) => {
+  try {
+    const docs = await getDb()
+      .collection("oplog_window")
+      .aggregate([
+        { $sort: { timestamp: -1 } },
+        { $group: {
+          _id: "$clusterId",
+          clusterName: { $first: "$clusterName" },
+          timestamp: { $first: "$timestamp" },
+          windowHours: { $first: "$windowHours" },
+          oldestTs: { $first: "$oldestTs" },
+          newestTs: { $first: "$newestTs" },
+        }},
+        { $project: { _id: 0, clusterName: 1, timestamp: 1, windowHours: 1, oldestTs: 1, newestTs: 1 } },
+      ])
+      .toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

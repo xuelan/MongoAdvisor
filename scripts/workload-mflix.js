@@ -1,7 +1,7 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const { MongoClient } = require("mongodb");
 
-const APP_NAME = "workload-mflix";
+const APP_NAME_AGG = "workload-mflix";
 
 const baseUri = process.env.MONGO_URI;
 if (!baseUri) {
@@ -9,24 +9,49 @@ if (!baseUri) {
   process.exit(1);
 }
 const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);
-const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}&readPreference=${readPref}`;
+
+/** Max docs from embedded_movies after the first $match (before unwinds / lookups). Lower = faster. */
+const EMBEDDED_AFTER_MATCH = parseInt(process.env.MFLIX_EMBEDDED_CAP || "400", 10);
+/** Max joined docs per $lookup sub-pipeline. */
+const LOOKUP_SUB_CAP = parseInt(process.env.MFLIX_LOOKUP_CAP || "45", 10);
+/** Max docs before $group in the runtime-outlier pipeline (avoids huge $push arrays). */
+const OUTLIER_PRE_GROUP_CAP = parseInt(process.env.MFLIX_OUTLIER_CAP || "1800", 10);
+
+function mongoUriFor(appName) {
+  const q = new URLSearchParams({ appName, readPreference: readPref });
+  return baseUri + (baseUri.includes("?") ? "&" : "?") + q.toString();
+}
 
 function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function pickN(arr, n) {
+  const copy = [...arr].sort(() => Math.random() - 0.5);
+  return copy.slice(0, Math.min(n, copy.length));
+}
 
-// ─── Pipeline 1: Actor collaboration network ────────────────────────────────
-const COMMENT_1 = "Mflix actor-collab: unwind cast, self-lookup co-stars, group pair frequency, rank top duos";
+const MFLIX_GENRES = [
+  "Drama", "Comedy", "Action", "Romance", "Thriller", "Horror", "Crime", "Adventure",
+  "Science Fiction", "Animation", "Documentary", "Fantasy",
+];
 
-const minRating1 = rand(0, 5);
-const limitP1 = rand(10, 30);
+// mflix_actor_group_rank
+const COMMENT_1 = "mflix_actor_group_rank";
+
+const minRating1 = rand(1, 4);
+const limitP1 = rand(8, 22);
 const pipeline1 = [
-  { $match: { cast: { $exists: true }, "imdb.rating": { $gt: minRating1 } } },
+  { $match: { cast: { $exists: true, $ne: [] }, "imdb.rating": { $gt: minRating1 } } },
+  { $limit: EMBEDDED_AFTER_MATCH },
   { $unwind: "$cast" },
   {
     $lookup: {
       from: "embedded_movies",
-      localField: "cast",
-      foreignField: "cast",
+      let: { actor: "$cast" },
+      pipeline: [
+        { $match: { $expr: { $in: ["$$actor", { $ifNull: ["$cast", []] }] } } },
+        { $project: { cast: 1, "imdb.rating": 1, genres: 1 } },
+        { $limit: LOOKUP_SUB_CAP },
+      ],
       as: "shared_movies",
     },
   },
@@ -82,15 +107,16 @@ const pipeline1 = [
   { $limit: limitP1 },
 ];
 
-// ─── Pipeline 2: Genre evolution by decade ───────────────────────────────────
-const COMMENT_2 = "Mflix genre-evolution: unwind genres+countries, bucket decades, double group, compute trend deltas";
+// mflix_genre_decade_rollups
+const COMMENT_2 = "mflix_genre_decade_rollups";
 
 const startYear = rand(1930, 1970);
 const endYear = rand(2000, 2020);
-const minVotes = rand(50, 500);
-const limitP2 = rand(15, 50);
+const minVotes = rand(80, 400);
+const limitP2 = rand(12, 35);
 const pipeline2 = [
   { $match: { year: { $gte: startYear, $lte: endYear }, genres: { $exists: true }, "imdb.votes": { $gte: minVotes } } },
+  { $limit: Math.min(900, EMBEDDED_AFTER_MATCH * 2) },
   { $unwind: "$genres" },
   { $unwind: "$countries" },
   {
@@ -178,21 +204,26 @@ const pipeline2 = [
   { $limit: limitP2 },
 ];
 
-// ─── Pipeline 3: Director career analysis with writer overlap ────────────────
-const COMMENT_3 = "Mflix director-career: unwind directors, lookup writer overlap, facet career phases, rank by longevity";
+// mflix_director_writer_overlap
+const COMMENT_3 = "mflix_director_writer_overlap";
 
-const minRating3 = rand(0, 4);
-const minFilms = rand(2, 5);
-const limitP3 = rand(10, 40);
+const minRating3 = rand(1, 4);
+const minFilms = rand(2, 4);
+const limitP3 = rand(8, 28);
 const sortP3 = pick(["total_votes", "film_count", "career_span", "avg_imdb"]);
 const pipeline3 = [
   { $match: { directors: { $exists: true }, year: { $exists: true }, "imdb.rating": { $gt: minRating3 } } },
+  { $limit: EMBEDDED_AFTER_MATCH },
   { $unwind: "$directors" },
   {
     $lookup: {
       from: "embedded_movies",
-      localField: "directors",
-      foreignField: "writers",
+      let: { dir: "$directors" },
+      pipeline: [
+        { $match: { $expr: { $in: ["$$dir", { $ifNull: ["$writers", []] }] } } },
+        { $project: { _id: 1 } },
+        { $limit: LOOKUP_SUB_CAP },
+      ],
       as: "also_wrote",
     },
   },
@@ -274,13 +305,14 @@ const pipeline3 = [
   { $limit: limitP3 },
 ];
 
-// ─── Pipeline 4: Award-winning cast overlap across genres ─────────────────────
-const COMMENT_4 = "Mflix award-cast-overlap: match awarded, unwind cast+genres, self-lookup shared films, group cross-genre stats";
+// mflix_award_cast_crossgenre
+const COMMENT_4 = "mflix_award_cast_crossgenre";
 
-const minWins4 = rand(1, 5);
-const limitP4 = rand(10, 30);
+const minWins4 = rand(2, 5);
+const limitP4 = rand(8, 22);
 const pipeline4 = [
   { $match: { "awards.wins": { $gte: minWins4 }, cast: { $exists: true }, genres: { $exists: true } } },
+  { $limit: EMBEDDED_AFTER_MATCH },
   { $unwind: "$cast" },
   { $unwind: "$genres" },
   {
@@ -290,7 +322,7 @@ const pipeline4 = [
       pipeline: [
         { $match: { $expr: { $and: [{ $in: ["$$actor", { $ifNull: ["$cast", []] }] }, { $not: { $in: ["$$genre", { $ifNull: ["$genres", []] }] } } ] } } },
         { $project: { title: 1, year: 1, "imdb.rating": 1 } },
-        { $limit: 10 },
+        { $limit: 8 },
       ],
       as: "crossover_films",
     },
@@ -336,11 +368,11 @@ const pipeline4 = [
   { $limit: limitP4 },
 ];
 
-// ─── Pipeline 5: Tomatoes critic vs viewer sentiment divergence ───────────────
-const COMMENT_5 = "Mflix sentiment-divergence: match rated, compute critic-viewer gap, unwind genres, bucket by gap severity, rank polarizing";
+// mflix_tomato_gap_by_genre
+const COMMENT_5 = "mflix_tomato_gap_by_genre";
 
-const minVotes5 = rand(100, 1000);
-const limitP5 = rand(15, 40);
+const minVotes5 = rand(200, 900);
+const limitP5 = rand(12, 32);
 const pipeline5 = [
   {
     $match: {
@@ -349,6 +381,7 @@ const pipeline5 = [
       "imdb.votes": { $gte: minVotes5 },
     },
   },
+  { $limit: Math.min(700, EMBEDDED_AFTER_MATCH * 2) },
   {
     $addFields: {
       sentiment_gap: { $abs: { $subtract: ["$tomatoes.critic.rating", "$tomatoes.viewer.rating"] } },
@@ -394,20 +427,25 @@ const pipeline5 = [
   { $limit: limitP5 },
 ];
 
-// ─── Pipeline 6: Language diversity and international reach ───────────────────
-const COMMENT_6 = "Mflix language-reach: unwind languages+countries, lookup same-language films, group polyglot stats, rank global reach";
+// mflix_language_country_reach
+const COMMENT_6 = "mflix_language_country_reach";
 
-const minRating6 = rand(3, 7);
-const limitP6 = rand(10, 30);
+const minRating6 = rand(4, 7);
+const limitP6 = rand(8, 24);
 const pipeline6 = [
   { $match: { languages: { $exists: true }, countries: { $exists: true }, "imdb.rating": { $gte: minRating6 } } },
+  { $limit: Math.min(500, EMBEDDED_AFTER_MATCH + 120) },
   { $unwind: "$languages" },
   { $unwind: "$countries" },
   {
     $lookup: {
       from: "embedded_movies",
-      localField: "languages",
-      foreignField: "languages",
+      let: { lang: "$languages" },
+      pipeline: [
+        { $match: { $expr: { $in: ["$$lang", { $ifNull: ["$languages", []] }] } } },
+        { $project: { year: 1, "imdb.rating": 1 } },
+        { $limit: LOOKUP_SUB_CAP },
+      ],
       as: "same_lang_films",
     },
   },
@@ -446,29 +484,29 @@ const pipeline6 = [
       total_films: { $sum: "$film_count" },
       avg_rating: { $avg: "$avg_rating" },
       avg_pool_size: { $avg: "$avg_pool_size" },
-      global_reach_score: {
-        $avg: { $multiply: ["$avg_pool_size", "$countries_produced"] },
-      },
     },
   },
   {
     $addFields: {
       avg_rating: { $round: ["$avg_rating", 1] },
-      global_reach_score: { $round: ["$global_reach_score", 0] },
+      global_reach_score: {
+        $round: [{ $multiply: ["$avg_pool_size", "$countries_produced"] }, 0],
+      },
     },
   },
   { $sort: { [pick(["global_reach_score", "total_films", "countries_produced"])]: -1 } },
   { $limit: limitP6 },
 ];
 
-// ─── Pipeline 7: Runtime anomaly detection per year ──────────────────────────
-const COMMENT_7 = "Mflix runtime-anomaly: compute yearly stats, flag outliers by stddev, self-lookup neighbors, rank extreme deviations";
+// mflix_runtime_zscore_outliers
+const COMMENT_7 = "mflix_runtime_zscore_outliers";
 
 const minYear7 = rand(1960, 1990);
 const maxYear7 = rand(2005, 2020);
-const limitP7 = rand(20, 50);
+const limitP7 = rand(15, 40);
 const pipeline7 = [
   { $match: { runtime: { $exists: true, $gt: 0 }, year: { $gte: minYear7, $lte: maxYear7 } } },
+  { $limit: OUTLIER_PRE_GROUP_CAP },
   {
     $group: {
       _id: "$year",
@@ -542,45 +580,254 @@ const pipelines = [
   { name: "Runtime Anomaly Detection", pipeline: pipeline7, comment: COMMENT_7 },
 ];
 
-async function main() {
-  const selected = process.argv[2] ? parseInt(process.argv[2]) : null;
+const aggregateWorkloads = pipelines.map((p) => ({
+  type: "aggregate",
+  appName: APP_NAME_AGG,
+  collection: "embedded_movies",
+  name: p.name,
+  pipeline: p.pipeline,
+  comment: p.comment,
+}));
 
-  const client = new MongoClient(uri, {
+// mflix_find_workloads (per-query appName)
+const fy1 = rand(1975, 2000);
+const fy2 = rand(fy1, 2020);
+const findMoviesYearRating = {
+  type: "find",
+  appName: "workload-mflix-movies-year-rating",
+  collection: "movies",
+  name: "Find movies: year window + IMDb floor",
+  comment: "mflix_movies_year_imdb_votes",
+  filter: {
+    year: { $gte: fy1, $lte: fy2 },
+    "imdb.rating": { $gte: rand(4, 8) },
+    "imdb.votes": { $gte: rand(100, 5000) },
+  },
+  project: { title: 1, year: 1, rated: 1, "imdb.rating": 1, "imdb.votes": 1, genres: 1, _id: 0 },
+  sort: { year: -1, "imdb.rating": -1 },
+  limit: rand(12, 45),
+};
+
+const gPick = pickN(MFLIX_GENRES, rand(1, 3));
+const findMoviesGenres = {
+  type: "find",
+  appName: "workload-mflix-movies-genres",
+  collection: "movies",
+  name: "Find movies: genre overlap",
+  comment: "mflix_movies_genres_runtime",
+  filter: { genres: { $in: gPick }, runtime: { $gte: rand(70, 95), $lte: rand(120, 200) } },
+  project: { title: 1, genres: 1, runtime: 1, year: 1, "imdb.rating": 1, _id: 0 },
+  sort: { "imdb.rating": -1 },
+  limit: rand(10, 35),
+};
+
+const findMoviesCommented = {
+  type: "find",
+  appName: "workload-mflix-movies-commented",
+  collection: "movies",
+  name: "Find movies: num_mflix_comments",
+  comment: "mflix_movies_comment_count",
+  filter: { num_mflix_comments: { $gte: rand(1, 25) } },
+  project: { title: 1, year: 1, num_mflix_comments: 1, "imdb.rating": 1, _id: 0 },
+  sort: { num_mflix_comments: -1 },
+  limit: rand(8, 28),
+};
+
+const ratedPick = pickN(["G", "PG", "PG-13", "R", "NOT RATED", "UNRATED"], rand(2, 4));
+const findMoviesRatedRuntime = {
+  type: "find",
+  appName: "workload-mflix-movies-rated-runtime",
+  collection: "movies",
+  name: "Find movies: rating labels + runtime",
+  comment: "mflix_movies_rated_runtime",
+  filter: {
+    rated: { $in: ratedPick },
+    runtime: { $gte: rand(75, 100), $lte: rand(130, 190) },
+  },
+  project: { title: 1, rated: 1, runtime: 1, year: 1, directors: 1, _id: 0 },
+  sort: { runtime: 1 },
+  limit: rand(15, 45),
+};
+
+const findMoviesTomatoes = {
+  type: "find",
+  appName: "workload-mflix-movies-tomatoes",
+  collection: "movies",
+  name: "Find movies: Tomatoes critic/viewer",
+  comment: "mflix_movies_tomato_metacritic",
+  filter: {
+    "tomatoes.critic.rating": { $gte: rand(4, 7) },
+    "tomatoes.viewer.rating": { $gte: rand(3, 8) },
+    metacritic: { $gte: rand(40, 75) },
+  },
+  project: {
+    title: 1,
+    year: 1,
+    metacritic: 1,
+    "tomatoes.critic.rating": 1,
+    "tomatoes.viewer.rating": 1,
+    _id: 0,
+  },
+  sort: { metacritic: -1 },
+  limit: rand(10, 32),
+};
+
+const emailNeedle = pick(["@gmail", "@yahoo", "@hotmail", ".edu", ".org"]);
+const emailRegex = emailNeedle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const findUsersEmail = {
+  type: "find",
+  appName: "workload-mflix-users-email",
+  collection: "users",
+  name: "Find users: email substring",
+  comment: "mflix_users_email_substr",
+  filter: { email: { $regex: emailRegex } },
+  project: { name: 1, email: 1, _id: 0 },
+  sort: { name: 1 },
+  skip: rand(0, 50),
+  limit: rand(6, 28),
+};
+
+let cd1 = new Date(rand(2008, 2014), rand(0, 11), rand(1, 28));
+let cd2 = new Date(rand(2015, 2022), rand(0, 11), rand(1, 28));
+if (cd1 > cd2) [cd1, cd2] = [cd2, cd1];
+const findCommentsByDate = {
+  type: "find",
+  appName: "workload-mflix-comments-date",
+  collection: "comments",
+  name: "Find comments: date range",
+  comment: "mflix_comments_date_window",
+  filter: { date: { $gte: cd1, $lte: cd2 } },
+  project: { name: 1, movie_id: 1, date: 1, text: 1, _id: 0 },
+  sort: { date: -1 },
+  skip: rand(0, 35),
+  limit: rand(10, 40),
+};
+
+const statePick = pick(["CA", "NY", "TX", "FL", "WA", "IL", "OH", "GA"]);
+const findTheatersState = {
+  type: "find",
+  appName: "workload-mflix-theaters-state",
+  collection: "theaters",
+  name: "Find theaters: by state",
+  comment: "mflix_theaters_by_state",
+  filter: { "location.address.state": statePick },
+  project: { theaterId: 1, "location.address.city": 1, "location.address.state": 1, _id: 0 },
+  sort: { theaterId: 1 },
+  limit: rand(12, 45),
+};
+
+const tidLo = rand(1, 500);
+const findTheatersIdRange = {
+  type: "find",
+  appName: "workload-mflix-theaters-id",
+  collection: "theaters",
+  name: "Find theaters: theaterId range",
+  comment: "mflix_theaters_id_range",
+  filter: { theaterId: { $gte: tidLo, $lte: tidLo + rand(120, 500) } },
+  project: { theaterId: 1, "location.geo": 1, _id: 0 },
+  sort: { theaterId: 1 },
+  limit: rand(12, 40),
+};
+
+const findSessionsSample = {
+  type: "find",
+  appName: "workload-mflix-sessions-sample",
+  collection: "sessions",
+  name: "Find sessions: sample slice",
+  comment: "mflix_sessions_user_skip_limit",
+  filter: { user_id: { $exists: true, $ne: "" } },
+  project: { user_id: 1, _id: 0 },
+  sort: { user_id: 1 },
+  skip: rand(0, 80),
+  limit: rand(5, 28),
+};
+
+const findWorkloads = [
+  findMoviesYearRating,
+  findMoviesGenres,
+  findMoviesCommented,
+  findMoviesRatedRuntime,
+  findMoviesTomatoes,
+  findUsersEmail,
+  findCommentsByDate,
+  findTheatersState,
+  findTheatersIdRange,
+  findSessionsSample,
+];
+
+const workloads = [...aggregateWorkloads, ...findWorkloads];
+
+async function main() {
+  const selected = process.argv[2] ? parseInt(process.argv[2], 10) : null;
+
+  const clientOpts = {
     maxPoolSize: 3,
     connectTimeoutMS: 10_000,
     serverSelectionTimeoutMS: 10_000,
-  });
+  };
+
+  const clientsByApp = new Map();
+
+  async function dbForApp(appName) {
+    if (!clientsByApp.has(appName)) {
+      const c = new MongoClient(mongoUriFor(appName), clientOpts);
+      await c.connect();
+      clientsByApp.set(appName, c);
+    }
+    return clientsByApp.get(appName).db("sample_mflix");
+  }
 
   try {
-    await client.connect();
-    const db = client.db("sample_mflix");
+    console.log(
+      `Caps: embedded_movies≤${EMBEDDED_AFTER_MATCH} after match · lookup sub≤${LOOKUP_SUB_CAP} · outlier pre-group≤${OUTLIER_PRE_GROUP_CAP} (env: MFLIX_EMBEDDED_CAP, MFLIX_LOOKUP_CAP, MFLIX_OUTLIER_CAP)\n`,
+    );
 
     let toRun;
     if (selected) {
-      toRun = [pipelines[selected - 1]];
+      if (selected < 1 || selected > workloads.length) {
+        console.error(`Index must be 1–${workloads.length} (aggregates 1–${aggregateWorkloads.length}, finds ${aggregateWorkloads.length + 1}–${workloads.length})`);
+        process.exit(1);
+      }
+      toRun = [workloads[selected - 1]];
     } else {
-      const count = rand(1, pipelines.length);
-      const shuffled = [...pipelines].sort(() => Math.random() - 0.5);
+      const count = rand(1, workloads.length);
+      const shuffled = [...workloads].sort(() => Math.random() - 0.5);
       toRun = shuffled.slice(0, count);
     }
 
-    for (const { name, pipeline, comment } of toRun) {
-      console.log(`\n▶ ${name}`);
-      console.log(`  comment: ${comment}\n`);
+    for (const w of toRun) {
+      console.log(`\n▶ ${w.name}`);
+      console.log(`  appName: ${w.appName}  collection: ${w.collection}`);
+      console.log(`  comment: ${w.comment}\n`);
 
+      const db = await dbForApp(w.appName);
       const start = Date.now();
-      const results = await db
-        .collection("embedded_movies")
-        .aggregate(pipeline, { allowDiskUse: true, comment })
-        .toArray();
-      const elapsed = ((Date.now() - start) / 1000).toFixed(2);
+      let results;
 
+      if (w.type === "aggregate") {
+        results = await db
+          .collection(w.collection)
+          .aggregate(w.pipeline, { allowDiskUse: true, comment: w.comment })
+          .toArray();
+      } else {
+        let cur = db.collection(w.collection).find(w.filter, { comment: w.comment });
+        if (w.project) cur = cur.project(w.project);
+        if (w.sort) cur = cur.sort(w.sort);
+        if (w.skip) cur = cur.skip(w.skip);
+        cur = cur.limit(w.limit);
+        results = await cur.toArray();
+      }
+
+      const elapsed = ((Date.now() - start) / 1000).toFixed(2);
       console.log(`  Completed in ${elapsed}s — ${results.length} results`);
-      console.log(`  Sample:`, JSON.stringify(results[0], null, 2).slice(0, 300), "…\n");
+      const sample = results[0] != null ? JSON.stringify(results[0], null, 2).slice(0, 300) : "(none)";
+      console.log(`  Sample:`, sample, results[0] != null ? "…\n" : "\n");
     }
   } finally {
-    await client.close();
-    console.log("Connection closed");
+    for (const c of clientsByApp.values()) {
+      await c.close();
+    }
+    console.log("All connections closed");
   }
 }
 

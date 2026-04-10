@@ -6,9 +6,9 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 const BASE_ITERATIONS = parseInt(process.argv[2]) || 10;
 const SCRIPTS = [
-  { file: "workload-agg.js", label: "airbnb-analytics" },
-  { file: "workload-agg2.js", label: "airbnb-seasonal" },
-  { file: "workload-mflix.js", label: "mflix-pipelines" },
+  { file: "workload-agg.js", label: "airbnb_listings_host_lookup_group" },
+  { file: "workload-agg2.js", label: "airbnb_reviews_unwind_season_rollups" },
+  { file: "workload-mflix.js", label: "mflix_agg_find_workloads" },
 ];
 
 const READ_PREFS = ["primary", "secondary"];

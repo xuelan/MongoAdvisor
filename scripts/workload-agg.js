@@ -2,7 +2,7 @@ require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") }
 const { MongoClient } = require("mongodb");
 
 const APP_NAME = "workload-a";
-const COMMENT = "Airbnb 10-stage analytics: match, lookup host listings, map reviews, group by country/type/tier";
+const COMMENT = "airbnb_listings_host_lookup_group";
 
 const baseUri = process.env.MONGO_URI;
 if (!baseUri) {
@@ -12,17 +12,21 @@ if (!baseUri) {
 const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);
 const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}&readPreference=${readPref}`;
 
+const LISTING_CAP = parseInt(process.env.AIRBNB_DOC_CAP || "900", 10);
+const HOST_LOOKUP_CAP = parseInt(process.env.AIRBNB_LOOKUP_CAP || "50", 10);
+
 function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 const minReviews = rand(1, 20);
 const minBedrooms = rand(0, 3);
 const reviewSlice = rand(5, 30);
-const limitN = rand(20, 100);
+const limitN = rand(15, 55);
 const sortField = pick(["total_listings", "avg_value_score", "avg_price", "avg_rating"]);
 const priceTiers = [rand(30, 70), rand(100, 200), rand(200, 400)].sort((a, b) => a - b);
 
 const pipeline = [
+  // airbnb_match_listings_filters
   {
     $match: {
       number_of_reviews: { $gte: minReviews },
@@ -31,17 +35,23 @@ const pipeline = [
     },
   },
 
-  // Stage 2 (slow): $lookup — find other listings by the same host
+  { $limit: LISTING_CAP },
+
+  // airbnb_lookup_same_host
   {
     $lookup: {
       from: "listingsAndReviews",
-      localField: "host.host_id",
-      foreignField: "host.host_id",
+      let: { hid: "$host.host_id" },
+      pipeline: [
+        { $match: { $expr: { $eq: ["$host.host_id", "$$hid"] } } },
+        { $project: { _id: 1, "host.host_id": 1 } },
+        { $limit: HOST_LOOKUP_CAP },
+      ],
       as: "host_other_listings",
     },
   },
 
-  // Stage 3 (medium): $addFields — heavy $map over reviews array
+  // airbnb_map_review_slice
   {
     $addFields: {
       review_summary: {
@@ -63,7 +73,7 @@ const pipeline = [
     },
   },
 
-  // Stage 4 (fast): $project — shape output, drop heavy fields
+  // airbnb_project_metrics
   {
     $project: {
       name: 1,
@@ -85,7 +95,7 @@ const pipeline = [
     },
   },
 
-  // Stage 5 (medium): $addFields — compute value score and tier
+  // airbnb_value_score_tier
   {
     $addFields: {
       value_score: {
@@ -113,7 +123,7 @@ const pipeline = [
     },
   },
 
-  // Stage 6 (slow): $group — aggregate by country, property_type, price_tier
+  // airbnb_group_country_type_tier
   {
     $group: {
       _id: {
@@ -135,7 +145,7 @@ const pipeline = [
     },
   },
 
-  // Stage 7 (fast): $addFields — derived group metrics
+  // airbnb_group_ratio_fields
   {
     $addFields: {
       superhost_ratio: {
@@ -147,7 +157,7 @@ const pipeline = [
     },
   },
 
-  // Stage 8 (fast): $project — flatten _id and shape final output
+  // airbnb_project_flatten
   {
     $project: {
       _id: 0,
@@ -167,6 +177,7 @@ const pipeline = [
     },
   },
 
+  // airbnb_sort_limit
   { $sort: { [sortField]: -1 } },
 
   { $limit: limitN },
@@ -183,7 +194,9 @@ async function main() {
     await client.connect();
     const db = client.db("sample_airbnb");
 
-    console.log(`Running 10-stage aggregation (reviews>=${minReviews}, beds>=${minBedrooms}, tiers=${priceTiers}, sort=${sortField}, limit=${limitN})…\n`);
+    console.log(
+      `Running 10-stage aggregation (reviews>=${minReviews}, beds>=${minBedrooms}, tiers=${priceTiers}, sort=${sortField}, limit=${limitN}, listingCap=${LISTING_CAP}, hostLookupCap=${HOST_LOOKUP_CAP})…\n`,
+    );
     const start = Date.now();
 
     const results = await db

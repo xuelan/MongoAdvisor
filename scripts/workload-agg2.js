@@ -2,7 +2,7 @@ require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") }
 const { MongoClient } = require("mongodb");
 
 const APP_NAME = "workload-b";
-const COMMENT = "Airbnb seasonal pricing: unwind reviews, bucket by month, facet top/bottom markets";
+const COMMENT = "airbnb_reviews_unwind_season_rollups";
 
 const baseUri = process.env.MONGO_URI;
 if (!baseUri) {
@@ -12,13 +12,16 @@ if (!baseUri) {
 const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);
 const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}&readPreference=${readPref}`;
 
+const SEASON_LISTING_CAP = parseInt(process.env.AIRBNB_SEASON_CAP || "1200", 10);
+
 function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-const limitN = rand(15, 60);
+const limitN = rand(12, 45);
 const sortField = pick(["total_reviews", "avg_price", "demand_density", "total_listings"]);
 
 const pipeline = [
+  // airbnb_match_reviews_market
   {
     $match: {
       reviews: { $exists: true, $ne: [] },
@@ -27,10 +30,12 @@ const pipeline = [
     },
   },
 
-  // Stage 2 (slow): unwind the reviews array — expands 55k docs into millions of rows
+  { $limit: SEASON_LISTING_CAP },
+
+  // airbnb_unwind_reviews
   { $unwind: "$reviews" },
 
-  // Stage 3 (medium): $addFields — extract temporal and pricing dimensions
+  // airbnb_review_time_price_amenity
   {
     $addFields: {
       review_month: { $month: "$reviews.date" },
@@ -51,7 +56,7 @@ const pipeline = [
     },
   },
 
-  // Stage 4 (slow): $group — aggregate by market, month, room_type
+  // airbnb_group_market_month_room
   {
     $group: {
       _id: {
@@ -74,7 +79,7 @@ const pipeline = [
     },
   },
 
-  // Stage 5 (medium): $addFields — compute derived metrics from group
+  // airbnb_listing_season_metrics
   {
     $addFields: {
       listing_count: { $size: "$unique_listings" },
@@ -98,7 +103,7 @@ const pipeline = [
     },
   },
 
-  // Stage 6 (fast): $project — drop the heavy unique_listings set, shape output
+  // airbnb_project_drop_id_sets
   {
     $project: {
       _id: 0,
@@ -117,7 +122,7 @@ const pipeline = [
     },
   },
 
-  // Stage 7 (slow): $group — re-aggregate by market + season for seasonal summary
+  // airbnb_group_market_season
   {
     $group: {
       _id: { market: "$market", season: "$season" },
@@ -131,7 +136,7 @@ const pipeline = [
     },
   },
 
-  // Stage 8 (fast): $addFields — demand density metric
+  // airbnb_demand_density
   {
     $addFields: {
       demand_density: {
@@ -140,6 +145,7 @@ const pipeline = [
     },
   },
 
+  // airbnb_sort_limit
   { $sort: { [sortField]: -1 } },
 
   { $limit: limitN },
@@ -156,7 +162,7 @@ async function main() {
     await client.connect();
     const db = client.db("sample_airbnb");
 
-    console.log(`Running seasonal pricing aggregation (sort=${sortField}, limit=${limitN})…\n`);
+    console.log(`Running seasonal pricing aggregation (sort=${sortField}, limit=${limitN}, preUnwindCap=${SEASON_LISTING_CAP})…\n`);
     const start = Date.now();
 
     const results = await db

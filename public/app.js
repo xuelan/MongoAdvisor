@@ -16,7 +16,7 @@ let topologyMap = {};
 let appLoadExecChart = null;
 let appLoadTimeChart = null;
 let slowestAppChart = null;
-let queryStatsTimelineChart = null;
+let bubbleChart = null;
 let treemapIOChart = null;
 let treemapCPUChart = null;
 
@@ -41,21 +41,67 @@ function destroyCharts(charts) {
 }
 
 // ─── Health ─────────────────────────────────────────────────────────
+const MSG_DB_DOWN =
+  "MongoMonitor cannot connect to its application database right now. The dashboard may be incomplete or stale. This page will keep checking automatically.";
+const MSG_API_UNEXPECTED =
+  "The MongoMonitor API returned an error. Some features may be unavailable until the service recovers.";
+const MSG_API_UNREACHABLE =
+  "Cannot reach the MongoMonitor server. Ensure it is running and reachable from your browser. This page will keep checking automatically.";
+
+function setDbBannerVisible(visible, message) {
+  const banner = document.getElementById("dbUnavailableBanner");
+  const textEl = document.getElementById("dbUnavailableText");
+  if (!banner || !textEl) return;
+  if (visible) {
+    textEl.textContent = message;
+    banner.hidden = false;
+    banner.setAttribute("aria-hidden", "false");
+  } else {
+    banner.hidden = true;
+    banner.setAttribute("aria-hidden", "true");
+    textEl.textContent = "";
+  }
+}
+
 async function checkHealth() {
   const badge = document.getElementById("mongoStatus");
   const dot = document.getElementById("statusDot");
-  try {
-    const res = await fetch(`${API}/api/health`);
-    const data = await res.json();
-    if (data.status === "ok") {
-      badge.textContent = "Connected";
-      badge.className = "badge ok";
-      dot.style.background = "#00ed64";
-    } else throw new Error();
-  } catch {
-    badge.textContent = "Disconnected";
+  const setConnected = () => {
+    badge.textContent = "Connected";
+    badge.className = "badge ok";
+    dot.style.background = "#00ed64";
+    setDbBannerVisible(false);
+  };
+  const setDisconnected = (badgeLabel, bannerMessage) => {
+    badge.textContent = badgeLabel;
     badge.className = "badge err";
     dot.style.background = "#ff5050";
+    if (bannerMessage) setDbBannerVisible(true, bannerMessage);
+    else setDbBannerVisible(false);
+  };
+
+  try {
+    const res = await fetch(`${API}/api/health`);
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      /* non-JSON body */
+    }
+
+    if (res.ok && data.status === "ok") {
+      setConnected();
+      return;
+    }
+
+    if (res.status === 503 || data.mongo === "disconnected" || data.status === "error") {
+      setDisconnected("Disconnected", MSG_DB_DOWN);
+      return;
+    }
+
+    setDisconnected("Disconnected", MSG_API_UNEXPECTED);
+  } catch {
+    setDisconnected("Unreachable", MSG_API_UNREACHABLE);
   }
 }
 
@@ -84,7 +130,7 @@ function renderTopology(clusterId) {
 
 // ─── Filters ────────────────────────────────────────────────────────
 
-const HIDDEN_DBS = ["admin", "config", "local", "mongomonitor"];
+const HIDDEN_DBS = ["admin", "config", "local", "mongomonitor", "#mongodb-mcp"];
 let allNamespaces = [];
 let visibleNamespaces = [];
 let allHosts = [];
@@ -194,16 +240,15 @@ function hostSelectNone() {
 
 async function loadMetrics() {
   if (!getSelectedNamespaces().length || !getSelectedHosts().length) {
-    destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart, queryStatsTimelineChart, treemapIOChart, treemapCPUChart]);
-    appLoadExecChart = appLoadTimeChart = slowestAppChart = queryStatsTimelineChart = treemapIOChart = treemapCPUChart = null;
-    const sq = document.getElementById("slowQuerySection");
-    if (sq) sq.style.display = "none";
+    destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart, bubbleChart, treemapIOChart, treemapCPUChart]);
+    appLoadExecChart = appLoadTimeChart = slowestAppChart = bubbleChart = treemapIOChart = treemapCPUChart = null;
     return;
   }
   await loadAppLoad();
-  await loadQueryStatsTimeline();
+  await loadBubbleChart();
   await loadImpactChart();
-  await loadSlowQueries();
+  await loadIndexAnalysis();
+  await loadStorageStats();
 }
 
 // ─── App Load: Exec Count + Exec Time + Slowest ─────────────────────
@@ -217,15 +262,18 @@ async function loadAppLoad() {
       return;
     }
 
-    const labels = data.map((d) => shortName(d.appName, 35));
-    const execCounts = data.map((d) => d.totalExecCount);
-    const execMs = data.map((d) => Math.round(d.totalExecMicros / 1000));
+    const TOP_N = 20;
+
+    // Top 20 by exec count
+    const byExec = [...data].sort((a, b) => b.totalExecCount - a.totalExecCount).slice(0, TOP_N);
+    const execLabels = byExec.map((d) => shortName(d.appName, 35));
+    const execCounts = byExec.map((d) => d.totalExecCount);
 
     appLoadExecChart = rebuildChart(appLoadExecChart, "appLoadExecChart", {
       type: "bar",
       data: {
-        labels,
-        datasets: [{ label: "Exec Count", data: execCounts, backgroundColor: CHART_COLORS.slice(0, labels.length), borderRadius: 4, maxBarThickness: 40 }],
+        labels: execLabels,
+        datasets: [{ label: "Exec Count", data: execCounts, backgroundColor: CHART_COLORS.slice(0, execLabels.length), borderRadius: 4, maxBarThickness: 40 }],
       },
       options: {
         ...chartDefaults,
@@ -236,12 +284,17 @@ async function loadAppLoad() {
         plugins: { ...chartDefaults.plugins, legend: { display: false } },
       },
     });
+
+    // Top 20 by total exec time
+    const byTime = [...data].sort((a, b) => b.totalExecMicros - a.totalExecMicros).slice(0, TOP_N);
+    const timeLabels = byTime.map((d) => shortName(d.appName, 35));
+    const execMs = byTime.map((d) => Math.round(d.totalExecMicros / 1000));
 
     appLoadTimeChart = rebuildChart(appLoadTimeChart, "appLoadTimeChart", {
       type: "bar",
       data: {
-        labels,
-        datasets: [{ label: "Total Time (ms)", data: execMs, backgroundColor: CHART_COLORS.slice(0, labels.length), borderRadius: 4, maxBarThickness: 40 }],
+        labels: timeLabels,
+        datasets: [{ label: "Total Time (ms)", data: execMs, backgroundColor: CHART_COLORS.slice(0, timeLabels.length), borderRadius: 4, maxBarThickness: 40 }],
       },
       options: {
         ...chartDefaults,
@@ -253,8 +306,12 @@ async function loadAppLoad() {
       },
     });
 
-    const avgMs = data.map((d) => d.totalExecCount > 0 ? Math.round(d.totalExecMicros / d.totalExecCount / 1000) : 0);
-    const sorted = labels.map((l, i) => ({ label: l, val: avgMs[i] })).sort((a, b) => b.val - a.val);
+    // Top 20 by avg latency
+    const withAvg = data.map((d) => ({
+      label: shortName(d.appName, 35),
+      val: d.totalExecCount > 0 ? Math.round(d.totalExecMicros / d.totalExecCount / 1000) : 0,
+    }));
+    const sorted = withAvg.sort((a, b) => b.val - a.val).slice(0, TOP_N);
 
     slowestAppChart = rebuildChart(slowestAppChart, "slowestAppChart", {
       type: "bar",
@@ -274,58 +331,119 @@ async function loadAppLoad() {
   } catch { /* ignore */ }
 }
 
-// ─── Query Stats Timeline ───────────────────────────────────────────
+// ─── Bubble Chart: appName + comment ─────────────────────────────────
 
-async function loadQueryStatsTimeline() {
+async function loadBubbleChart() {
   try {
-    const p = metricsParams();
-    const res = await fetch(`${API}/api/metrics/query-stats?${p}`);
+    const res = await fetch(`${API}/api/metrics/bubble?${metricsParams()}`);
     const data = await res.json();
-    if (!data.length) { destroyCharts([queryStatsTimelineChart]); return; }
-
-    const byShape = {};
-    for (const d of data) {
-      const key = d.queryShapeHash;
-      if (!byShape[key]) byShape[key] = [];
-      byShape[key].push(d);
+    if (!data.length) {
+      destroyCharts([bubbleChart]);
+      bubbleChart = null;
+      return;
     }
 
-    const deltasByTime = {};
-    for (const entries of Object.values(byShape)) {
-      entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-      for (let i = 1; i < entries.length; i++) {
-        const ts = entries[i].timestamp;
-        const dExec = Math.max(0, entries[i].execCount - entries[i - 1].execCount);
-        const dDocs = Math.max(0, entries[i].docsExamined - entries[i - 1].docsExamined);
-        if (!deltasByTime[ts]) deltasByTime[ts] = { exec: 0, docs: 0 };
-        deltasByTime[ts].exec += dExec;
-        deltasByTime[ts].docs += dDocs;
-      }
-    }
+    const maxTotal = Math.max(...data.map((d) => d.totalMillis), 1);
+    const MIN_R = 5, MAX_R = 30;
 
-    const times = Object.keys(deltasByTime).sort();
-    if (!times.length) { destroyCharts([queryStatsTimelineChart]); return; }
-    const labels = times.map((t) => new Date(t).toLocaleTimeString());
+    const points = data.map((d, i) => {
+      const app = d.appName || "(no appName)";
+      const comment = d.comment || "(no comment)";
+      const label = `${shortName(app, 20)} | ${shortName(comment, 30)}`;
+      const r = MIN_R + (d.totalMillis / maxTotal) * (MAX_R - MIN_R);
+      return {
+        x: d.count,
+        y: d.avgMillis,
+        r,
+        label,
+        appName: app,
+        comment,
+        count: d.count,
+        avgMillis: d.avgMillis,
+        maxMillis: d.maxMillis,
+        totalMillis: d.totalMillis,
+        totalCpuMs: d.totalCpuMs,
+        totalBytesReadMB: d.totalBytesReadMB,
+        docsExamined: d.totalDocsExamined,
+        keysExamined: d.totalKeysExamined,
+        ns: (d.namespaces || []).filter(Boolean).join(", ") || "—",
+        plans: (d.planSummaries || []).filter(Boolean).join(", ") || "—",
+        backgroundColor: CHART_COLORS[i % CHART_COLORS.length] + "BB",
+        borderColor: CHART_COLORS[i % CHART_COLORS.length],
+      };
+    });
 
-    queryStatsTimelineChart = rebuildChart(queryStatsTimelineChart, "queryStatsTimeline", {
-      type: "bar",
+    bubbleChart = rebuildChart(bubbleChart, "bubbleChart", {
+      type: "bubble",
       data: {
-        labels,
-        datasets: [
-          { label: "New Executions", data: times.map((t) => deltasByTime[t].exec), backgroundColor: "rgba(0,237,100,0.6)", borderRadius: 3, yAxisID: "y", order: 2 },
-          { label: "New Docs Examined", data: times.map((t) => deltasByTime[t].docs), type: "line", borderColor: "#00a3ff", backgroundColor: "rgba(0,163,255,0.08)", fill: true, tension: 0.3, pointRadius: 3, borderWidth: 2, yAxisID: "y1", order: 1 },
-        ],
+        datasets: [{
+          data: points,
+          backgroundColor: points.map((p) => p.backgroundColor),
+          borderColor: points.map((p) => p.borderColor),
+          borderWidth: 1.5,
+        }],
       },
       options: {
         ...chartDefaults,
+        maintainAspectRatio: false,
         scales: {
-          x: { ticks: { color: "#5c6d7e", font: { size: 9 } }, grid: { color: "#1e3a4f22" } },
-          y: { type: "linear", position: "left", ticks: { color: "#00ed64" }, grid: { color: "#1e3a4f" }, beginAtZero: true, title: { display: true, text: "New Executions", color: "#00ed64" } },
-          y1: { type: "linear", position: "right", ticks: { color: "#00a3ff" }, grid: { display: false }, beginAtZero: true, title: { display: true, text: "New Docs Examined", color: "#00a3ff" } },
+          x: {
+            title: { display: true, text: "Slow Query Count", color: "#8899a6", font: { size: 11 } },
+            ticks: { color: "#8899a6" },
+            grid: { color: "#1e3a4f" },
+            beginAtZero: true,
+          },
+          y: {
+            title: { display: true, text: "Avg Latency (ms)", color: "#8899a6", font: { size: 11 } },
+            ticks: { color: "#8899a6" },
+            grid: { color: "#1e3a4f" },
+            beginAtZero: true,
+          },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            maxWidth: 500,
+            bodyFont: { size: 11 },
+            titleFont: { size: 12 },
+            callbacks: {
+              title(items) {
+                const p = items[0]?.raw;
+                if (!p) return "";
+                const lines = [`App: ${p.appName}`];
+                const comment = p.comment || "(no comment)";
+                for (let i = 0; i < comment.length; i += 70) {
+                  const prefix = i === 0 ? "Comment: " : "  ";
+                  lines.push(prefix + comment.slice(i, i + 70));
+                }
+                return lines;
+              },
+              label(ctx) {
+                const p = ctx.raw;
+                const wrap = (prefix, s, w) => {
+                  if (!s || s.length <= w) return [`${prefix}${s || "—"}`];
+                  const lines = [];
+                  for (let i = 0; i < s.length; i += w) {
+                    lines.push((i === 0 ? prefix : "  ") + s.slice(i, i + w));
+                  }
+                  return lines;
+                };
+                return [
+                  `Count: ${p.count}  |  Avg: ${p.avgMillis}ms  |  Max: ${p.maxMillis}ms`,
+                  `Total: ${formatNum(p.totalMillis)}ms  |  CPU: ${p.totalCpuMs}ms`,
+                  `IO: ${p.totalBytesReadMB} MB  |  Docs: ${formatNum(p.docsExamined)}  |  Keys: ${formatNum(p.keysExamined)}`,
+                  ...wrap("NS: ", p.ns, 60),
+                  ...wrap("Plan: ", p.plans, 55),
+                ];
+              },
+            },
+          },
         },
       },
     });
-  } catch { /* ignore */ }
+  } catch (err) {
+    console.error("bubble chart error:", err);
+  }
 }
 
 // ─── Dual Treemaps: IO heatmap + CPU heatmap ────────────────────────
@@ -401,22 +519,53 @@ function buildTreemapConfig(treeData, metricKey, colorStops, tooltipFn) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          callbacks: {
-            title: (items) => {
-              const d = items[0]?.raw?._data;
-              if (!d) return items[0]?.raw?.g || "";
-              if (d.queryLabel) return `${d.appName} — ${d.queryLabel}`;
-              return d.appName || "";
-            },
-            label: (ctx) => {
-              const d = ctx.raw?._data;
-              if (!d || !d.queryLabel) return `Slow queries: ${ctx.raw?.v || 0}`;
-              return tooltipFn(d);
-            },
+          enabled: false,
+          external: (context) => {
+            const { chart, tooltip } = context;
+            let el = chart.canvas.parentNode.querySelector(".treemap-tooltip");
+            if (!el) {
+              el = document.createElement("div");
+              el.className = "treemap-tooltip";
+              chart.canvas.parentNode.style.position = "relative";
+              chart.canvas.parentNode.appendChild(el);
+              el._hovered = false;
+              el.addEventListener("mouseenter", () => { el._hovered = true; });
+              el.addEventListener("mouseleave", () => {
+                el._hovered = false;
+                el.style.opacity = "0";
+                el.style.pointerEvents = "none";
+              });
+            }
+            if (tooltip.opacity === 0) {
+              if (el._hovered) return;
+              clearTimeout(el._hideTimer);
+              el._hideTimer = setTimeout(() => {
+                if (!el._hovered) { el.style.opacity = "0"; el.style.pointerEvents = "none"; }
+              }, 300);
+              return;
+            }
+            clearTimeout(el._hideTimer);
+            const d = tooltip.dataPoints?.[0]?.raw?._data;
+            if (!d) { el.style.opacity = "0"; return; }
+            const kids = d.children || [d];
+            let html = `<div class="tt-title">App: ${d.appName || "—"}</div>`;
+            for (const kid of kids) {
+              const comment = kid.fullComment || "(no comment)";
+              const metrics = tooltipFn(kid);
+              html += `<div class="tt-entry">`;
+              html += `<div class="tt-comment">${comment}</div>`;
+              html += metrics.map((l) => `<div class="tt-metric">${l}</div>`).join("");
+              html += `</div>`;
+            }
+            el.innerHTML = html;
+            el.style.opacity = "1";
+            el.style.pointerEvents = "auto";
+            const pos = tooltip.caretX;
+            const mid = chart.width / 2;
+            el.style.left = pos < mid ? (tooltip.caretX + 10) + "px" : "";
+            el.style.right = pos >= mid ? (chart.width - tooltip.caretX + 10) + "px" : "";
+            el.style.top = Math.max(0, tooltip.caretY - 40) + "px";
           },
-          titleFont: { weight: "bold", size: 13 },
-          bodyFont: { size: 11 },
-          padding: 10,
         },
       },
     },
@@ -459,16 +608,19 @@ async function loadImpactChart() {
       return;
     }
 
-    const maxBytes = Math.max(...data.map((d) => d.totalBytesRead), 1);
-    const maxCpu = Math.max(...data.map((d) => d.totalCpuNanos), 1);
+    const top = [...data].sort((a, b) => b.count - a.count).slice(0, 20);
 
-    const treeData = data.map((d) => {
+    const maxBytes = Math.max(...top.map((d) => d.totalBytesRead), 1);
+    const maxCpu = Math.max(...top.map((d) => d.totalCpuNanos), 1);
+
+    const treeData = top.map((d) => {
       const app = d.appName || "(no appName)";
       const comment = d.comment || "(no comment)";
       const shortComment = comment.length > 40 ? comment.slice(0, 38) + "…" : comment;
       const ns = (d.namespaces || []).filter(Boolean).join(", ") || "—";
       return {
         appName: app,
+        tileLabel: `${app} — ${shortComment}`,
         queryLabel: shortComment,
         fullComment: comment,
         value: Math.max(d.count, 1),
@@ -503,39 +655,193 @@ async function loadImpactChart() {
 
 // ─── Slow Queries ───────────────────────────────────────────────────
 
-async function loadSlowQueries() {
-  const section = document.getElementById("slowQuerySection");
-  const container = document.getElementById("slowQueryList");
+// ─── Index Analysis ─────────────────────────────────────────────────
+
+async function loadIndexAnalysis() {
+  await Promise.all([loadUnusedIndexes(), loadRedundantIndexes()]);
+}
+
+async function loadUnusedIndexes() {
+  const container = document.getElementById("unusedIndexList");
   try {
-    const res = await fetch(`${API}/api/metrics/slow-queries?${metricsParams()}`);
+    const res = await fetch(`${API}/api/metrics/unused-indexes?${metricsParams()}`);
     const data = await res.json();
     if (!data.length) {
-      section.style.display = "none";
+      container.innerHTML = '<div class="index-empty">No unused indexes detected</div>';
       return;
     }
-    section.style.display = "";
-    container.innerHTML = data.slice(0, 50).map((sq) => `
-      <div class="slow-query-item">
-        <div class="sq-header">
-          <span class="sq-app">${sq.appName || "unknown"}</span>
-          <span class="sq-millis">${sq.millis}ms</span>
-          <span class="sq-time">${new Date(sq.timestamp).toLocaleString()}</span>
+    container.innerHTML = data.map((idx) => `
+      <div class="index-item unused">
+        <div class="idx-header">
+          <span class="idx-ns">${idx.namespace}</span>
+          <span class="idx-name">${idx.indexName}</span>
         </div>
-        <div class="sq-details">
-          <span>ns: ${sq.namespace || "—"}</span>
-          <span>plan: ${sq.planSummary || "—"}</span>
-          <span>docs: ${sq.docsExamined}</span>
-          <span>keys: ${sq.keysExamined}</span>
-          ${sq.cpuNanos ? `<span>cpu: ${(sq.cpuNanos / 1e6).toFixed(1)}ms</span>` : ""}
-          ${sq.bytesRead ? `<span>read: ${(sq.bytesRead / 1024).toFixed(1)}KB</span>` : ""}
+        <div class="idx-details">
+          <span>key: <code>${JSON.stringify(idx.key)}</code></span>
+          <span>ops: ${idx.totalOps}</span>
+          <span>host: ${idx.host ? shortHost(idx.host) : "—"}</span>
+          <span>since: ${new Date(idx.statsSince).toLocaleDateString()}</span>
         </div>
-        ${sq.comment ? `<div class="sq-comment">comment: ${sq.comment}</div>` : ""}
       </div>
     `).join("");
   } catch {
-    section.style.display = "none";
+    container.innerHTML = '<div class="index-empty">Failed to load</div>';
   }
 }
+
+async function loadRedundantIndexes() {
+  const container = document.getElementById("redundantIndexList");
+  try {
+    const res = await fetch(`${API}/api/metrics/redundant-indexes?${metricsParams()}`);
+    const data = await res.json();
+    if (!data.length) {
+      container.innerHTML = '<div class="index-empty">No redundant indexes detected</div>';
+      return;
+    }
+    container.innerHTML = data.map((idx) => `
+      <div class="index-item redundant">
+        <div class="idx-header">
+          <span class="idx-ns">${idx.namespace}</span>
+          <span class="idx-name">${idx.indexName}</span>
+        </div>
+        <div class="idx-details">
+          <span>key: <code>${JSON.stringify(idx.key)}</code></span>
+          <span class="idx-covered">covered by: <strong>${idx.coveredBy}</strong> <code>${JSON.stringify(idx.coveredByKey)}</code></span>
+        </div>
+      </div>
+    `).join("");
+  } catch {
+    container.innerHTML = '<div class="index-empty">Failed to load</div>';
+  }
+}
+
+// ─── Storage Table ──────────────────────────────────────────────────
+
+function fmtBytes(b) {
+  if (b >= 1_073_741_824) return (b / 1_073_741_824).toFixed(2) + " GB";
+  if (b >= 1_048_576) return (b / 1_048_576).toFixed(1) + " MB";
+  if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
+  return b + " B";
+}
+
+function fragClass(pct) {
+  if (pct >= 50) return "frag-high";
+  if (pct >= 25) return "frag-med";
+  return "";
+}
+
+function idxRatioClass(pct) {
+  if (pct >= 20) return "frag-high";
+  if (pct >= 10) return "frag-med";
+  return "";
+}
+
+let storageSortKey = "storageSizeBytes";
+let storageSortAsc = false;
+let storageData = [];
+let storagePage = 0;
+const STORAGE_PAGE_SIZE = 10;
+
+function reusableClass(bytes) {
+  if (bytes >= 100_000_000) return "reusable-high";
+  if (bytes >= 10_000_000) return "reusable-med";
+  return "";
+}
+
+function renderStorageTable() {
+  const tbody = document.getElementById("storageBody");
+  const emptyMsg = document.getElementById("storageEmpty");
+  const table = document.getElementById("storageTable");
+  const pager = document.getElementById("storagePager");
+
+  if (!storageData.length) {
+    tbody.innerHTML = "";
+    table.style.display = "none";
+    emptyMsg.style.display = "";
+    if (pager) pager.style.display = "none";
+    return;
+  }
+  table.style.display = "";
+  emptyMsg.style.display = "none";
+
+  const sorted = [...storageData].sort((a, b) => {
+    const av = a[storageSortKey], bv = b[storageSortKey];
+    if (typeof av === "string") return storageSortAsc ? av.localeCompare(bv) : bv.localeCompare(av);
+    return storageSortAsc ? av - bv : bv - av;
+  });
+
+  const totalPages = Math.ceil(sorted.length / STORAGE_PAGE_SIZE);
+  if (storagePage >= totalPages) storagePage = totalPages - 1;
+  if (storagePage < 0) storagePage = 0;
+  const start = storagePage * STORAGE_PAGE_SIZE;
+  const page = sorted.slice(start, start + STORAGE_PAGE_SIZE);
+
+  tbody.innerHTML = page.map((d) => {
+    const idxDetail = (d.indexDetails || [])
+      .filter((i) => i.fragmentationPct > 0)
+      .map((i) => `${i.name}: ${i.fragmentationPct}%`)
+      .join(", ");
+    const idxTitle = idxDetail ? `title="Index frag: ${idxDetail}"` : "";
+    return `
+    <tr ${idxTitle}>
+      <td class="st-ns">${d.namespace}</td>
+      <td>${formatNum(d.docCount)}</td>
+      <td>${fmtBytes(d.dataSizeBytes)}</td>
+      <td>${fmtBytes(d.storageSizeBytes)}</td>
+      <td class="st-reusable ${reusableClass(d.collReusableBytes || 0)}">${fmtBytes(d.collReusableBytes || 0)}</td>
+      <td class="st-frag ${fragClass(d.fragmentationPct)}">${d.fragmentationPct}%</td>
+      <td>${fmtBytes(d.totalIndexSizeBytes)}</td>
+      <td>${d.numIndexes > 10 ? '<span class="frag-high">' + d.numIndexes + "</span>" : d.numIndexes}</td>
+      <td class="${idxRatioClass(d.indexToDataRatioPct)}">${d.indexToDataRatioPct}%</td>
+    </tr>`;
+  }).join("");
+
+  if (pager) {
+    if (totalPages <= 1) {
+      pager.style.display = "none";
+    } else {
+      pager.style.display = "flex";
+      pager.innerHTML = `
+        <button class="btn-page" ${storagePage === 0 ? "disabled" : ""} onclick="storageGoPage(${storagePage - 1})">‹ Prev</button>
+        <span class="page-info">${storagePage + 1} / ${totalPages} <span class="page-total">(${sorted.length} rows)</span></span>
+        <button class="btn-page" ${storagePage >= totalPages - 1 ? "disabled" : ""} onclick="storageGoPage(${storagePage + 1})">Next ›</button>`;
+    }
+  }
+}
+
+function storageGoPage(p) {
+  storagePage = p;
+  renderStorageTable();
+}
+
+async function loadStorageStats() {
+  try {
+    const params = new URLSearchParams();
+    for (const ns of getSelectedNamespaces()) params.append("namespace", ns);
+    const res = await fetch(`${API}/api/metrics/storage?${params}`)
+    storageData = await res.json();
+    renderStorageTable();
+  } catch {
+    storageData = [];
+    renderStorageTable();
+  }
+}
+
+document.getElementById("storageTable").querySelector("thead").addEventListener("click", (e) => {
+  const th = e.target.closest("[data-sort]");
+  if (!th) return;
+  const key = th.dataset.sort;
+  if (storageSortKey === key) {
+    storageSortAsc = !storageSortAsc;
+  } else {
+    storageSortKey = key;
+    storageSortAsc = key === "namespace";
+  }
+  storagePage = 0;
+  document.querySelectorAll("#storageTable th").forEach((t) => t.classList.remove("sorted-asc", "sorted-desc"));
+  th.classList.add(storageSortAsc ? "sorted-asc" : "sorted-desc");
+  renderStorageTable();
+});
 
 // ─── Clusters ───────────────────────────────────────────────────────
 
@@ -600,14 +906,148 @@ async function removeCluster(id) {
   loadClusters();
 }
 
+// ─── Disk Usage ─────────────────────────────────────────────────────
+
+function diskLevel(pct) {
+  if (pct >= 85) return "danger";
+  if (pct >= 70) return "warn";
+  return "ok";
+}
+
+async function loadDiskUsage() {
+  const container = document.getElementById("diskUsageContent");
+  try {
+    const res = await fetch(`${API}/api/metrics/disk-usage`);
+    const data = await res.json();
+    if (!data.length) {
+      container.innerHTML = '<span class="empty">No disk data yet</span>';
+      return;
+    }
+    const maxPct = Math.max(...data.map((d) => d.usagePct));
+    const infoBtn = document.getElementById("diskInfoBtn");
+    const tooltip = document.getElementById("diskInfoTooltip");
+    if (maxPct >= 85) {
+      infoBtn.className = "info-btn danger";
+      tooltip.innerHTML = 'Your disk usage is above 85%. Please consider scaling your storage size urgently. <a href="https://www.mongodb.com/docs/atlas/customize-storage/#std-label-create-cluster-storage" target="_blank" rel="noopener">Learn more</a>';
+    } else if (maxPct >= 70) {
+      infoBtn.className = "info-btn warn";
+      tooltip.innerHTML = 'Your disk usage is above 70%. Please consider scaling your storage size. <a href="https://www.mongodb.com/docs/atlas/customize-storage/#std-label-create-cluster-storage" target="_blank" rel="noopener">Learn more</a>';
+    } else {
+      infoBtn.className = "info-btn";
+      tooltip.innerHTML = 'Disk usage is healthy. <a href="https://www.mongodb.com/docs/atlas/customize-storage/#std-label-create-cluster-storage" target="_blank" rel="noopener">Learn more about storage options</a>';
+    }
+
+    container.innerHTML = data.map((d) => {
+      const lvl = diskLevel(d.usagePct);
+      return `
+        <div class="disk-gauge">
+          <div class="disk-gauge-header">
+            <span class="disk-gauge-name">${d.clusterName}</span>
+            <span class="disk-gauge-pct ${lvl}">${d.usagePct}%</span>
+          </div>
+          <div class="disk-bar"><div class="disk-bar-fill ${lvl}" style="width:${Math.min(d.usagePct, 100)}%"></div></div>
+          <div class="disk-details">
+            <span>Used: ${fmtBytes(d.fsUsedSizeBytes)}</span>
+            <span>Free: ${fmtBytes(d.fsFreeBytes)}</span>
+            <span>Total: ${fmtBytes(d.fsTotalSizeBytes)}</span>
+          </div>
+          <div class="disk-time">Updated: ${new Date(d.timestamp).toLocaleString()}</div>
+        </div>`;
+    }).join("");
+  } catch {
+    container.innerHTML = '<span class="empty">Failed to load disk data</span>';
+  }
+}
+
+// ─── Oplog Window ───────────────────────────────────────────────────
+
+function oplogLevel(hours) {
+  if (hours < 48) return "danger";
+  if (hours < 72) return "warn";
+  return "ok";
+}
+
+async function loadOplogWindow() {
+  const container = document.getElementById("oplogContent");
+  try {
+    const res = await fetch(`${API}/api/metrics/oplog-window`);
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : [];
+    } catch {
+      container.innerHTML = `<span class="empty">Failed to load oplog data: response was not JSON (HTTP ${res.status}). The API may have returned an HTML error page—check the MongoMonitor server logs and application database connection.</span>`;
+      return;
+    }
+    if (!Array.isArray(data)) {
+      container.innerHTML = '<span class="empty">Failed to load oplog data: API returned an unexpected payload.</span>';
+      return;
+    }
+    if (!res.ok) {
+      const msg = (data && typeof data === "object" && (data.error || data.message)) || `HTTP ${res.status}`;
+      container.innerHTML = `<span class="empty">Failed to load oplog data: ${String(msg).replace(/</g, "&lt;")}</span>`;
+      return;
+    }
+    if (!data.length) {
+      container.innerHTML =
+        '<span class="empty">No oplog data yet. The collector samples <code>local.oplog.rs</code> on a schedule; ensure clusters are replica sets and check server logs for <code>[oplogWindow]</code> errors.</span>';
+      return;
+    }
+    const minHours = Math.min(...data.map((d) => d.windowHours));
+    const oplogBtn = document.getElementById("oplogInfoBtn");
+    const oplogTip = document.getElementById("oplogInfoTooltip");
+    if (minHours < 48) {
+      oplogBtn.className = "info-btn danger";
+      oplogTip.innerHTML = 'Your Oplog Window is too small. A small window reduces resilience: any secondary or downstream consumer (Search, triggers, Sync, external pipelines) could be impacted. <a href="https://www.mongodb.com/docs/manual/core/replica-set-oplog/" target="_blank" rel="noopener">Learn more</a>';
+    } else if (minHours < 72) {
+      oplogBtn.className = "info-btn warn";
+      oplogTip.innerHTML = 'Your Oplog Window is getting small. A small window reduces resilience: any secondary or downstream consumer (Search, triggers, Sync, external pipelines) could be impacted. <a href="https://www.mongodb.com/docs/manual/core/replica-set-oplog/" target="_blank" rel="noopener">Learn more</a>';
+    } else {
+      oplogBtn.className = "info-btn";
+      oplogTip.innerHTML = 'Oplog window is healthy. <a href="https://www.mongodb.com/docs/manual/core/replica-set-oplog/" target="_blank" rel="noopener">Learn more about the oplog</a>';
+    }
+
+    container.innerHTML = data.map((d) => {
+      const lvl = oplogLevel(d.windowHours);
+      const maxBar = 168;
+      const barPct = Math.min((d.windowHours / maxBar) * 100, 100);
+      return `
+        <div class="disk-gauge">
+          <div class="disk-gauge-header">
+            <span class="disk-gauge-name">${d.clusterName}</span>
+            <span class="disk-gauge-pct ${lvl}">${d.windowHours}h</span>
+          </div>
+          <div class="disk-bar"><div class="disk-bar-fill ${lvl}" style="width:${barPct}%"></div></div>
+          <div class="disk-details">
+            <span>Oldest: ${new Date(d.oldestTs).toLocaleString()}</span>
+            <span>Newest: ${new Date(d.newestTs).toLocaleString()}</span>
+          </div>
+          ${d.windowHours < 48 ? '<div class="oplog-warn">Warning: oplog window below 48h — risk of replication issues</div>' : ""}
+          <div class="disk-time">Updated: ${new Date(d.timestamp).toLocaleString()}</div>
+        </div>`;
+    }).join("");
+  } catch {
+    container.innerHTML =
+      '<span class="empty">Failed to load oplog data: network error or request was blocked. Check that the MongoMonitor server is reachable.</span>';
+  }
+}
+
 // ─── Init ───────────────────────────────────────────────────────────
 checkHealth();
 loadClusters();
+loadDiskUsage();
+loadOplogWindow();
+loadStorageStats();
 Promise.all([loadNamespaces(), loadHosts()]).then(() => loadMetrics());
 
 setInterval(() => {
+  checkHealth();
   loadNamespaces();
   loadHosts();
   loadMetrics();
   loadClusters();
+  loadDiskUsage();
+  loadOplogWindow();
 }, 60_000);
+
+setInterval(loadStorageStats, 600_000);
