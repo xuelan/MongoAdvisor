@@ -12,16 +12,17 @@ if (!baseUri) {
 const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);
 const uri = baseUri + (baseUri.includes("?") ? "&" : "?") + `appName=${APP_NAME}&readPreference=${readPref}`;
 
-const LISTING_CAP = parseInt(process.env.AIRBNB_DOC_CAP || "900", 10);
-const HOST_LOOKUP_CAP = parseInt(process.env.AIRBNB_LOOKUP_CAP || "50", 10);
+/** Defaults tuned ~10× lighter than the old ~65s average run; raise via env for stress tests. */
+const LISTING_CAP = parseInt(process.env.AIRBNB_DOC_CAP || "80", 10);
+const HOST_LOOKUP_CAP = parseInt(process.env.AIRBNB_LOOKUP_CAP || "8", 10);
 
 function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-const minReviews = rand(1, 20);
-const minBedrooms = rand(0, 3);
-const reviewSlice = rand(5, 30);
-const limitN = rand(15, 55);
+const minReviews = rand(3, 15);
+const minBedrooms = rand(0, 2);
+const reviewSlice = rand(2, 5);
+const limitN = rand(8, 18);
 const sortField = pick(["total_listings", "avg_value_score", "avg_price", "avg_rating"]);
 const priceTiers = [rand(30, 70), rand(100, 200), rand(200, 400)].sort((a, b) => a - b);
 
@@ -36,6 +37,25 @@ const pipeline = [
   },
 
   { $limit: LISTING_CAP },
+
+  // Strip bulky fields and pre-slice reviews before per-doc $lookup (large win on listingsAndReviews_big)
+  {
+    $project: {
+      host: 1,
+      address: 1,
+      price: 1,
+      cleaning_fee: 1,
+      number_of_reviews: 1,
+      amenities: 1,
+      bedrooms: 1,
+      accommodates: 1,
+      room_type: 1,
+      property_type: 1,
+      name: 1,
+      review_scores: 1,
+      reviews: { $slice: [{ $ifNull: ["$reviews", []] }, reviewSlice] },
+    },
+  },
 
   // airbnb_lookup_same_host
   {
@@ -56,7 +76,7 @@ const pipeline = [
     $addFields: {
       review_summary: {
         $map: {
-          input: { $slice: ["$reviews", reviewSlice] },
+          input: "$reviews",
           as: "r",
           in: {
             reviewer: "$$r.reviewer_name",

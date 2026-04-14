@@ -1,5 +1,6 @@
 const { getDb } = require("./db");
 const { ensureConnected } = require("./pool-cache");
+const { logMonitorEvent } = require("./monitor-log");
 
 const TOPOLOGIES = "topologies";
 const CLUSTERS = "clusters";
@@ -27,6 +28,16 @@ async function discoverOne(cluster) {
   console.log(
     `Discovered ${cluster.name}: ${topology.hosts.length} members, primary=${topology.primary}`,
   );
+  await logMonitorEvent({
+    source: "discovery",
+    action: "topology.discover",
+    outcome: "ok",
+    clusterId: cluster._id,
+    clusterName: cluster.name,
+    targetCollection: TOPOLOGIES,
+    detail: `upsert topology: ${topology.hosts.length} hosts, primary=${topology.primary || "—"}`,
+    meta: { hostCount: topology.hosts.length, primary: topology.primary || null },
+  });
   return topology;
 }
 
@@ -46,6 +57,15 @@ async function discoverAll() {
       results.push(topology);
     } catch (err) {
       console.error(`Discovery failed for "${cluster.name}":`, err.message);
+      await logMonitorEvent({
+        source: "discovery",
+        action: "topology.discover",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: TOPOLOGIES,
+        error: err.message,
+      });
     }
   }
 

@@ -20,7 +20,7 @@ function getPool(cluster) {
     maxIdleTimeMS: 600_000,
     connectTimeoutMS: 10_000,
     serverSelectionTimeoutMS: 10_000,
-    appName: "MongoMonitor",
+    appName: "MongoAdvisor",
   });
 
   pools.set(id, client);
@@ -34,14 +34,16 @@ async function ensureConnected(cluster) {
 }
 
 function getDirectPool(cluster, host) {
-  const key = `direct:${host}`;
+  const key = `direct:${cluster._id}:${host}`;
   if (pools.has(key)) return pools.get(key);
 
   const uri = decryptUri(cluster.uri);
   if (!uri) throw new Error(`Cluster "${cluster.name}" has no URI`);
 
   const parsed = new URL(uri);
-  const userInfo = parsed.username ? `${parsed.username}:${parsed.password}@` : "";
+  const userInfo = parsed.username
+    ? `${encodeURIComponent(parsed.username)}:${encodeURIComponent(parsed.password || "")}@`
+    : "";
   const params = parsed.search || "";
   const db = parsed.pathname || "/";
   const directUri = `mongodb://${userInfo}${host}${db}${params}`;
@@ -54,7 +56,7 @@ function getDirectPool(cluster, host) {
     maxIdleTimeMS: 600_000,
     connectTimeoutMS: 10_000,
     serverSelectionTimeoutMS: 10_000,
-    appName: "MongoMonitor",
+    appName: "MongoAdvisor",
   });
 
   pools.set(key, client);
@@ -78,12 +80,28 @@ async function closeAll() {
 }
 
 function removePool(clusterId) {
+  removePoolsForCluster(clusterId);
+}
+
+/** Close SRV and all per-host direct pools for one cluster (e.g. after URI change). */
+function removePoolsForCluster(clusterId) {
   const id = clusterId.toString();
-  const client = pools.get(id);
-  if (client) {
-    client.close().catch(() => {});
-    pools.delete(id);
+  const keys = [];
+  for (const k of pools.keys()) {
+    if (k === id || (typeof k === "string" && k.startsWith(`direct:${id}:`))) keys.push(k);
+  }
+  for (const k of keys) {
+    const client = pools.get(k);
+    if (client) client.close().catch(() => {});
+    pools.delete(k);
   }
 }
 
-module.exports = { getPool, ensureConnected, ensureDirectConnected, closeAll, removePool };
+module.exports = {
+  getPool,
+  ensureConnected,
+  ensureDirectConnected,
+  closeAll,
+  removePool,
+  removePoolsForCluster,
+};

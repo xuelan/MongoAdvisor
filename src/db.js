@@ -17,13 +17,14 @@ async function connect() {
   });
 
   await client.connect();
-  console.log("Connected to MongoDB backend");
+  const dbName = process.env.MONGO_DB || "mongoadvisor";
+  console.log(`MongoAdvisor: using application database "${dbName}"`);
   return client;
 }
 
 function getDb() {
   if (!client) throw new Error("Database not connected. Call connect() first.");
-  return client.db(process.env.MONGO_DB || "mongomonitor");
+  return client.db(process.env.MONGO_DB || "mongoadvisor");
 }
 
 function getClient() {

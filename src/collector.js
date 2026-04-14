@@ -1,8 +1,11 @@
 const crypto = require("crypto");
+const { EJSON } = require("bson");
 const { getDb } = require("./db");
 const { ensureConnected, ensureDirectConnected } = require("./pool-cache");
 const { decrypt, isEncrypted } = require("./crypto");
 const { discoverAll } = require("./discovery");
+const { HIDDEN_SET } = require("./hidden-dbs");
+const { logMonitorEvent } = require("./monitor-log");
 
 const CLUSTERS = "clusters";
 const QUERY_STATS = "query_stats";
@@ -36,6 +39,20 @@ function isIgnoredNs(ns) {
 
 function hashShape(shape) {
   return crypto.createHash("md5").update(JSON.stringify(shape)).digest("hex");
+}
+
+/** Full `$queryStats` metrics subdocument (Long / Decimal128 / nested stats). */
+function cloneQueryStatsMetrics(metrics) {
+  if (metrics == null || typeof metrics !== "object") return null;
+  try {
+    return EJSON.deserialize(EJSON.serialize(metrics));
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(metrics));
+    } catch {
+      return null;
+    }
+  }
 }
 
 async function collectQueryStatsForHost(cluster, host) {
@@ -78,6 +95,7 @@ async function collectQueryStatsForHost(cluster, host) {
         sumOfSquares: entry.metrics?.firstResponseExecMicros?.sumOfSquares || 0,
       },
       lastExecutionMicros: entry.metrics?.lastExecutionMicros || 0,
+      metrics: cloneQueryStatsMetrics(entry.metrics),
     });
   }
 
@@ -123,6 +141,7 @@ async function collectQueryStats(cluster) {
             sumOfSquares: entry.metrics?.firstResponseExecMicros?.sumOfSquares || 0,
           },
           lastExecutionMicros: entry.metrics?.lastExecutionMicros || 0,
+          metrics: cloneQueryStatsMetrics(entry.metrics),
         };
       });
     if (!docs.length) return 0;
@@ -148,8 +167,25 @@ async function collectQueryStatsAll() {
     try {
       const count = await collectQueryStats(cluster);
       console.log(`[queryStats] ${cluster.name}: ${count} entries collected (all nodes)`);
+      await logMonitorEvent({
+        action: "queryStats.collect",
+        outcome: "ok",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: QUERY_STATS,
+        detail: `inserted ${count} document(s)`,
+        meta: { insertedCount: count },
+      });
     } catch (err) {
       console.error(`[queryStats] ${cluster.name} failed:`, err.message);
+      await logMonitorEvent({
+        action: "queryStats.collect",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: QUERY_STATS,
+        error: err.message,
+      });
     }
   }
 }
@@ -158,6 +194,41 @@ async function collectQueryStatsAll() {
 
 function decryptField(val) {
   return val && isEncrypted(val) ? decrypt(val) : val;
+}
+
+/** MongoDB structured logs use `t` (often `{"$date":"..."}`) for event time — not ingestion time. */
+function parseLogTimestampFromMongoJson(log) {
+  const t = log && log.t;
+  if (t == null) return null;
+  if (typeof t === "string") {
+    const d = new Date(t);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof t === "object") {
+    if (typeof t.$date === "string") {
+      const d = new Date(t.$date);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    if (t.$date && typeof t.$date === "object" && typeof t.$date.$numberLong === "string") {
+      const d = new Date(parseInt(t.$date.$numberLong, 10));
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+  }
+  return null;
+}
+
+function extractOccurredAtFromRawLine(line) {
+  let m = line.match(/"t"\s*:\s*\{\s*"\$date"\s*:\s*"([^"]+)"/);
+  if (m) {
+    const d = new Date(m[1]);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  m = line.match(/"t"\s*:\s*"([^"]+)"/);
+  if (m) {
+    const d = new Date(m[1]);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
 }
 
 async function collectSlowQueries(cluster) {
@@ -207,11 +278,15 @@ async function collectSlowQueries(cluster) {
         if (isIgnoredApp(parsed.appName)) continue;
         const ns = sq.namespace || parsed.namespace || null;
         if (isIgnoredNs(ns)) continue;
+        const occurredAt =
+          parsed.occurredAt instanceof Date && !Number.isNaN(parsed.occurredAt.getTime())
+            ? parsed.occurredAt
+            : null;
         allDocs.push({
           clusterId: cluster._id,
           clusterName: cluster.name,
           host,
-          timestamp: now,
+          timestamp: occurredAt || now,
           appName: parsed.appName || null,
           comment: parsed.comment || null,
           namespace: ns,
@@ -243,6 +318,7 @@ function parseLogLine(line) {
     const cmd = a.command || {};
     const storage = a.storage?.data || {};
     return {
+      occurredAt: parseLogTimestampFromMongoJson(log),
       appName: a.appName || cmd.appName || null,
       comment: cmd.comment || null,
       namespace: a.ns || null,
@@ -259,6 +335,7 @@ function parseLogLine(line) {
     const extract = (pattern) => line.match(pattern)?.[1] || null;
     const extractNum = (pattern) => parseInt(extract(pattern) || "0", 10);
     return {
+      occurredAt: extractOccurredAtFromRawLine(line),
       appName: extract(/appName:"([^"]+)"/),
       comment: extract(/comment:"([^"]+)"/),
       namespace: extract(/(?:ns|namespace):\s*"?([^\s",]+)/),
@@ -282,15 +359,37 @@ async function collectSlowQueriesAll() {
       if (count > 0) {
         console.log(`[slowQueries] ${cluster.name}: ${count} entries collected`);
       }
+      const hasAtlas = Boolean(
+        cluster.atlasProjectId && cluster.atlasPublicKey && cluster.atlasPrivateKey,
+      );
+      await logMonitorEvent({
+        action: "slowQueries.collect",
+        outcome: hasAtlas ? "ok" : "skipped",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: SLOW_QUERIES,
+        detail: hasAtlas
+          ? `inserted ${count} document(s)`
+          : "Atlas API keys not configured — no fetch",
+        meta: { insertedCount: count, atlasConfigured: hasAtlas },
+      });
     } catch (err) {
       console.error(`[slowQueries] ${cluster.name} failed:`, err.message);
+      await logMonitorEvent({
+        action: "slowQueries.collect",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: SLOW_QUERIES,
+        error: err.message,
+      });
     }
   }
 }
 
 // ─── $indexStats + redundant index collector ────────────────────────
 
-const SYSTEM_DBS = new Set(["admin", "config", "local", "mongomonitor", "#mongodb-mcp"]);
+const SYSTEM_DBS = HIDDEN_SET;
 
 function isRedundantPrefix(shortKey, longKey) {
   const shortFields = Object.entries(shortKey);
@@ -299,72 +398,91 @@ function isRedundantPrefix(shortKey, longKey) {
   return shortFields.every(([field, dir], i) => longFields[i] && longFields[i][0] === field && longFields[i][1] === dir);
 }
 
-async function collectIndexStatsForHost(cluster, host) {
-  const client = await ensureDirectConnected(cluster, host);
+/**
+ * Walk user DBs/collections via a normal RS connection (hits primary).
+ * Used so we never call listDatabases on secondaries — directConnection to a secondary often fails that command.
+ */
+async function listUserCollectionNamespaces(client) {
   const adminDb = client.db("admin");
   const dbList = await adminDb.command({ listDatabases: 1, nameOnly: true });
   const dbNames = dbList.databases.map((d) => d.name).filter((n) => !SYSTEM_DBS.has(n));
-
-  const now = new Date();
-  const unusedDocs = [];
-  const redundantDocs = [];
-
+  const out = [];
   for (const dbName of dbNames) {
     const db = client.db(dbName);
     let collections;
     try {
       collections = await db.listCollections({}, { nameOnly: true }).toArray();
-    } catch { continue; }
-
+    } catch {
+      continue;
+    }
     for (const collInfo of collections) {
       if (collInfo.name.startsWith("system.")) continue;
-      const ns = `${dbName}.${collInfo.name}`;
-      const coll = db.collection(collInfo.name);
+      out.push({
+        dbName,
+        collName: collInfo.name,
+        ns: `${dbName}.${collInfo.name}`,
+      });
+    }
+  }
+  return out;
+}
 
-      let stats;
-      try {
-        stats = await coll.aggregate([{ $indexStats: {} }]).toArray();
-      } catch { continue; }
+/**
+ * Run $indexStats for each namespace on an existing client.
+ * `hostLabel` is stored on docs (replica member hostname or primary for SRV pass).
+ */
+async function collectIndexStatsWithClient(client, cluster, hostLabel, namespaceList) {
+  const now = new Date();
+  const unusedDocs = [];
+  const redundantDocs = [];
 
-      const indexDefs = [];
-      for (const s of stats) {
-        indexDefs.push({ name: s.name, key: s.key, spec: s.spec || {} });
+  for (const { dbName, collName, ns } of namespaceList) {
+    const coll = client.db(dbName).collection(collName);
+    let stats;
+    try {
+      stats = await coll.aggregate([{ $indexStats: {} }]).toArray();
+    } catch {
+      continue;
+    }
 
-        if (s.name === "_id_") continue;
-        const ops = s.accesses?.ops ?? 0;
-        if (ops === 0) {
-          unusedDocs.push({
+    const indexDefs = [];
+    for (const s of stats) {
+      indexDefs.push({ name: s.name, key: s.key, spec: s.spec || {} });
+
+      if (s.name === "_id_") continue;
+      const ops = s.accesses?.ops ?? 0;
+      if (ops === 0) {
+        unusedDocs.push({
+          clusterId: cluster._id,
+          clusterName: cluster.name,
+          host: hostLabel,
+          namespace: ns,
+          indexName: s.name,
+          key: s.key,
+          totalOps: 0,
+          statsSince: s.accesses?.since || now,
+          timestamp: now,
+        });
+      }
+    }
+
+    for (let i = 0; i < indexDefs.length; i++) {
+      if (indexDefs[i].name === "_id_") continue;
+      for (let j = 0; j < indexDefs.length; j++) {
+        if (i === j) continue;
+        if (isRedundantPrefix(indexDefs[i].key, indexDefs[j].key)) {
+          redundantDocs.push({
             clusterId: cluster._id,
             clusterName: cluster.name,
-            host,
+            host: hostLabel,
             namespace: ns,
-            indexName: s.name,
-            key: s.key,
-            totalOps: 0,
-            statsSince: s.accesses?.since || now,
+            indexName: indexDefs[i].name,
+            key: indexDefs[i].key,
+            coveredBy: indexDefs[j].name,
+            coveredByKey: indexDefs[j].key,
             timestamp: now,
           });
-        }
-      }
-
-      for (let i = 0; i < indexDefs.length; i++) {
-        if (indexDefs[i].name === "_id_") continue;
-        for (let j = 0; j < indexDefs.length; j++) {
-          if (i === j) continue;
-          if (isRedundantPrefix(indexDefs[i].key, indexDefs[j].key)) {
-            redundantDocs.push({
-              clusterId: cluster._id,
-              clusterName: cluster.name,
-              host,
-              namespace: ns,
-              indexName: indexDefs[i].name,
-              key: indexDefs[i].key,
-              coveredBy: indexDefs[j].name,
-              coveredByKey: indexDefs[j].key,
-              timestamp: now,
-            });
-            break;
-          }
+          break;
         }
       }
     }
@@ -373,23 +491,60 @@ async function collectIndexStatsForHost(cluster, host) {
   return { unusedDocs, redundantDocs };
 }
 
+/** Per-replica direct connection — for unused-index counts per host. */
+async function collectIndexStatsForHost(cluster, host, namespaceList) {
+  const client = await ensureDirectConnected(cluster, host);
+  return collectIndexStatsWithClient(client, cluster, host, namespaceList);
+}
+
 async function collectIndexStatsAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
     try {
       const topology = await getDb().collection("topologies").findOne({ clusterId: cluster._id });
       const hosts = topology?.hosts?.length ? topology.hosts : [];
-      if (!hosts.length) continue;
+      if (!hosts.length) {
+        console.warn(`[indexStats] ${cluster.name}: no topology hosts — run discovery (wait for next poll or restart)`);
+        await logMonitorEvent({
+          action: "indexStats.collect",
+          outcome: "skipped",
+          clusterId: cluster._id,
+          clusterName: cluster.name,
+          targetCollection: INDEX_STATS,
+          detail: "no topology hosts — discovery not run yet",
+        });
+        continue;
+      }
+
+      let namespaceList = [];
+      let srvClient;
+      try {
+        srvClient = await ensureConnected(cluster);
+        namespaceList = await listUserCollectionNamespaces(srvClient);
+      } catch (err) {
+        console.error(`[indexStats] ${cluster.name} namespace list (primary) failed:`, err.message);
+        await logMonitorEvent({
+          action: "indexStats.collect",
+          outcome: "error",
+          clusterId: cluster._id,
+          clusterName: cluster.name,
+          targetCollection: INDEX_STATS,
+          detail: "namespace list (primary) failed — index_stats not refreshed",
+          error: err.message,
+        });
+        continue;
+      }
 
       await getDb().collection(INDEX_STATS).deleteMany({ clusterId: cluster._id });
 
       let totalUnused = 0;
       let totalRedundant = 0;
+      const hostErrors = [];
 
       // Collect $indexStats (unused) from all nodes
       for (const host of hosts) {
         try {
-          const { unusedDocs } = await collectIndexStatsForHost(cluster, host);
+          const { unusedDocs } = await collectIndexStatsForHost(cluster, host, namespaceList);
           if (unusedDocs.length) {
             await getDb().collection(INDEX_STATS).insertMany(
               unusedDocs.map((d) => ({ ...d, type: "unused" })),
@@ -399,13 +554,20 @@ async function collectIndexStatsAll() {
           totalUnused += unusedDocs.length;
         } catch (err) {
           console.error(`[indexStats] ${cluster.name} host=${host}: ${err.message}`);
+          hostErrors.push({ host, phase: "unused", message: err.message });
         }
       }
 
-      // Redundant index detection only on primary (definitions are the same on all nodes)
-      const primary = topology.primary || hosts[0];
+      // Redundant index definitions are identical on all members — use SRV client (same auth as
+      // namespace discovery). directConnection to hello.primary often fails Atlas auth.
+      const primaryLabel = topology.primary || hosts[0];
       try {
-        const { redundantDocs } = await collectIndexStatsForHost(cluster, primary);
+        const { redundantDocs } = await collectIndexStatsWithClient(
+          srvClient,
+          cluster,
+          primaryLabel,
+          namespaceList,
+        );
         if (redundantDocs.length) {
           await getDb().collection(INDEX_STATS).insertMany(
             redundantDocs.map((d) => ({ ...d, type: "redundant" })),
@@ -414,11 +576,36 @@ async function collectIndexStatsAll() {
         }
         totalRedundant = redundantDocs.length;
       } catch (err) {
-        console.error(`[indexStats] ${cluster.name} redundant check failed: ${err.message}`);
+        console.error(`[indexStats] ${cluster.name} redundant check failed:`, err.message);
+        hostErrors.push({ host: primaryLabel, phase: "redundant", message: err.message });
       }
-      console.log(`[indexStats] ${cluster.name}: ${totalUnused} unused, ${totalRedundant} redundant`);
+      console.log(
+        `[indexStats] ${cluster.name}: ${namespaceList.length} collections, ${totalUnused} unused, ${totalRedundant} redundant`,
+      );
+      await logMonitorEvent({
+        action: "indexStats.collect",
+        outcome: "ok",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: INDEX_STATS,
+        detail: `replaced snapshot: ${namespaceList.length} collections scanned, ${totalUnused} unused + ${totalRedundant} redundant rows written`,
+        meta: {
+          collectionCount: namespaceList.length,
+          unusedRows: totalUnused,
+          redundantRows: totalRedundant,
+          hostErrors: hostErrors.length ? hostErrors : undefined,
+        },
+      });
     } catch (err) {
       console.error(`[indexStats] ${cluster.name} failed:`, err.message);
+      await logMonitorEvent({
+        action: "indexStats.collect",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: INDEX_STATS,
+        error: err.message,
+      });
     }
   }
 }
@@ -518,8 +705,25 @@ async function collectStorageStatsAll() {
     try {
       const count = await collectStorageStats(cluster);
       console.log(`[storageStats] ${cluster.name}: ${count} collections scanned`);
+      await logMonitorEvent({
+        action: "storageStats.collect",
+        outcome: count > 0 ? "ok" : "skipped",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: STORAGE_STATS,
+        detail: count > 0 ? `replaced snapshot with ${count} collection row(s)` : "no user collections to scan",
+        meta: { rowCount: count },
+      });
     } catch (err) {
       console.error(`[storageStats] ${cluster.name} failed:`, err.message);
+      await logMonitorEvent({
+        action: "storageStats.collect",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: STORAGE_STATS,
+        error: err.message,
+      });
     }
   }
 }
@@ -592,8 +796,25 @@ async function collectDiskUsageAll() {
     try {
       const pct = await collectDiskUsage(cluster);
       console.log(`[diskUsage] ${cluster.name}: ${pct}%`);
+      await logMonitorEvent({
+        action: "diskUsage.collect",
+        outcome: "ok",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: DISK_USAGE,
+        detail: `inserted dbStats snapshot, usagePct=${pct}`,
+        meta: { usagePct: pct },
+      });
     } catch (err) {
       console.error(`[diskUsage] ${cluster.name} failed:`, err.message);
+      await logMonitorEvent({
+        action: "diskUsage.collect",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: DISK_USAGE,
+        error: err.message,
+      });
     }
   }
 }
@@ -637,8 +858,28 @@ async function collectOplogWindowAll() {
         const warn = hours < 48 ? " ⚠ LOW" : "";
         console.log(`[oplogWindow] ${cluster.name}: ${hours}h${warn}`);
       }
+      await logMonitorEvent({
+        action: "oplogWindow.collect",
+        outcome: hours === null ? "skipped" : "ok",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: OPLOG_WINDOW,
+        detail:
+          hours === null
+            ? "no oplog sample (not a replica set or empty oplog.rs)"
+            : `inserted snapshot, windowHours=${hours}`,
+        meta: hours === null ? {} : { windowHours: hours },
+      });
     } catch (err) {
       console.error(`[oplogWindow] ${cluster.name} failed:`, err.message);
+      await logMonitorEvent({
+        action: "oplogWindow.collect",
+        outcome: "error",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: OPLOG_WINDOW,
+        error: err.message,
+      });
     }
   }
 }

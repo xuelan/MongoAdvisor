@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MongoMonitor</title>
+  <title>MongoAdvisor</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-treemap@3"></script>
   <link rel="stylesheet" href="style.css">
@@ -11,7 +11,7 @@
 <body>
   <header>
     <div class="dot" id="statusDot"></div>
-    <h1>MongoMonitor</h1>
+    <h1>MongoAdvisor</h1>
     <span class="badge" id="mongoStatus">checking…</span>
   </header>
 
@@ -29,8 +29,31 @@
         <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
         <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
         <input name="atlasPrivateKey" class="full" placeholder="Atlas Private API Key (optional)" type="password">
-        <div><button type="submit" class="btn">Add Cluster</button></div>
+        <div class="cluster-form-actions">
+          <button type="submit" class="btn">Add Cluster</button>
+          <button type="button" class="btn btn-secondary" id="toggleEditClusterPanel">Edit connection</button>
+        </div>
       </form>
+      <div id="clusterFormFeedback" class="cluster-form-feedback" role="status" aria-live="polite" hidden></div>
+      <div id="clusterEditPanel" class="cluster-edit-panel" hidden>
+        <p class="cluster-edit-intro">Select a cluster, change fields, then save. Leave <strong>connection string</strong> blank to keep the current URI; leave <strong>Atlas private key</strong> blank to keep the current key.</p>
+        <label class="cluster-edit-label" for="clusterEditSelect">Cluster</label>
+        <select id="clusterEditSelect" class="cluster-edit-select">
+          <option value="">Select cluster…</option>
+        </select>
+        <form class="add-cluster cluster-edit-form" id="clusterEditForm">
+          <input name="name" placeholder="Cluster name" required>
+          <input name="region" placeholder="Region (optional)">
+          <input name="uri" class="full" placeholder="New connection string (optional)" autocomplete="off">
+          <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
+          <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
+          <input name="atlasPrivateKey" class="full" placeholder="Atlas Private API Key (optional)" type="password" autocomplete="off">
+          <div class="cluster-form-actions">
+            <button type="submit" class="btn">Save changes</button>
+            <button type="button" class="btn btn-secondary" id="cancelClusterEdit">Cancel</button>
+          </div>
+        </form>
+      </div>
       <ul class="cluster-list" id="clusterList">
         <li class="empty">Loading…</li>
       </ul>
@@ -215,7 +238,19 @@
     </div>
 
     <section class="card" id="storageSection">
-      <h2>Storage & Fragmentation <span class="subtitle">per collection — daily scan — source: collStats</span></h2>
+      <div class="card-header-row">
+        <h2>Storage & Fragmentation <span class="subtitle">per collection — daily scan — source: collStats</span></h2>
+        <div class="info-btn-wrap">
+          <button type="button" class="info-btn" aria-label="Fragmentation and storage recommendations">i</button>
+          <div class="info-tooltip info-tooltip-storage">
+            <strong>Explanation</strong><br>
+            Fragmentation mainly matters when you are disk-bound or need to shrink storage.<br><br>
+            To allow the WiredTiger storage engine to release this empty space to the operating system, you can de-fragment your data files. This can be achieved by using the <a href="https://www.mongodb.com/docs/manual/reference/command/compact/#mongodb-dbcommand-dbcmd.compact" target="_blank" rel="noopener">compact</a> command or the <a href="https://www.mongodb.com/docs/manual/reference/command/autoCompact/" target="_blank" rel="noopener">autoCompact</a> command (from MongoDB 8.0).<br><br>
+            <strong>Recommended Actions</strong><br>
+            When fragmentation reaches a significant level, create a support ticket requesting a scheduled rolling <a href="https://www.mongodb.com/docs/manual/tutorial/resync-replica-set-member/#std-label-resync-replica-member" target="_blank" rel="noopener">resync</a> (high availability) during a maintenance window. This is often the easiest approach on managed clusters.
+          </div>
+        </div>
+      </div>
       <div class="storage-table-wrap">
         <table class="storage-table" id="storageTable">
           <thead>

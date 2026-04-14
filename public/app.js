@@ -42,11 +42,11 @@ function destroyCharts(charts) {
 
 // ─── Health ─────────────────────────────────────────────────────────
 const MSG_DB_DOWN =
-  "MongoMonitor cannot connect to its application database right now. The dashboard may be incomplete or stale. This page will keep checking automatically.";
+  "MongoAdvisor cannot connect to its application database right now. The dashboard may be incomplete or stale. This page will keep checking automatically.";
 const MSG_API_UNEXPECTED =
-  "The MongoMonitor API returned an error. Some features may be unavailable until the service recovers.";
+  "The MongoAdvisor API returned an error. Some features may be unavailable until the service recovers.";
 const MSG_API_UNREACHABLE =
-  "Cannot reach the MongoMonitor server. Ensure it is running and reachable from your browser. This page will keep checking automatically.";
+  "Cannot reach the MongoAdvisor server. Ensure it is running and reachable from your browser. This page will keep checking automatically.";
 
 function setDbBannerVisible(visible, message) {
   const banner = document.getElementById("dbUnavailableBanner");
@@ -130,7 +130,8 @@ function renderTopology(clusterId) {
 
 // ─── Filters ────────────────────────────────────────────────────────
 
-const HIDDEN_DBS = ["admin", "config", "local", "mongomonitor", "#mongodb-mcp"];
+// Keep in sync with src/hidden-dbs.js (HIDDEN_TOP_LEVEL_DBS)
+const HIDDEN_DBS = ["admin", "config", "local", "mongoadvisor", "mongomonitor", "#mongodb-mcp"];
 let allNamespaces = [];
 let visibleNamespaces = [];
 let allHosts = [];
@@ -170,6 +171,14 @@ function metricsParams() {
     params.set("since", since);
   }
   return params;
+}
+
+/** Index list APIs: host filter only. Do not pass namespace — $queryStats namespaces omit collections with no recent traffic but indexes still exist there. */
+function indexListParams() {
+  const params = new URLSearchParams();
+  for (const h of getSelectedHosts()) params.append("host", h);
+  const q = params.toString();
+  return q ? `?${q}` : "";
 }
 
 function shortHost(h) {
@@ -242,11 +251,11 @@ async function loadMetrics() {
   if (!getSelectedNamespaces().length || !getSelectedHosts().length) {
     destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart, bubbleChart, treemapIOChart, treemapCPUChart]);
     appLoadExecChart = appLoadTimeChart = slowestAppChart = bubbleChart = treemapIOChart = treemapCPUChart = null;
-    return;
+  } else {
+    await loadAppLoad();
+    await loadBubbleChart();
+    await loadImpactChart();
   }
-  await loadAppLoad();
-  await loadBubbleChart();
-  await loadImpactChart();
   await loadIndexAnalysis();
   await loadStorageStats();
 }
@@ -664,7 +673,7 @@ async function loadIndexAnalysis() {
 async function loadUnusedIndexes() {
   const container = document.getElementById("unusedIndexList");
   try {
-    const res = await fetch(`${API}/api/metrics/unused-indexes?${metricsParams()}`);
+    const res = await fetch(`${API}/api/metrics/unused-indexes${indexListParams()}`);
     const data = await res.json();
     if (!data.length) {
       container.innerHTML = '<div class="index-empty">No unused indexes detected</div>';
@@ -692,7 +701,7 @@ async function loadUnusedIndexes() {
 async function loadRedundantIndexes() {
   const container = document.getElementById("redundantIndexList");
   try {
-    const res = await fetch(`${API}/api/metrics/redundant-indexes?${metricsParams()}`);
+    const res = await fetch(`${API}/api/metrics/redundant-indexes${indexListParams()}`);
     const data = await res.json();
     if (!data.length) {
       container.innerHTML = '<div class="index-empty">No redundant indexes detected</div>';
@@ -845,31 +854,82 @@ document.getElementById("storageTable").querySelector("thead").addEventListener(
 
 // ─── Clusters ───────────────────────────────────────────────────────
 
+function escAttr(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
+
+let clusterFormFeedbackTimer = null;
+function showClusterFormFeedback(message, isError) {
+  const el = document.getElementById("clusterFormFeedback");
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = false;
+  el.className = "cluster-form-feedback " + (isError ? "err" : "ok");
+  clearTimeout(clusterFormFeedbackTimer);
+  clusterFormFeedbackTimer = setTimeout(() => {
+    el.hidden = true;
+    el.textContent = "";
+    el.className = "cluster-form-feedback";
+  }, 6000);
+}
+
+function populateClusterEditSelect() {
+  const sel = document.getElementById("clusterEditSelect");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Select cluster…</option>';
+  for (const c of clusters) {
+    const opt = document.createElement("option");
+    opt.value = c._id;
+    opt.textContent = clusterDisplayName(clusters, c);
+    sel.appendChild(opt);
+  }
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+/** Two registrations with the same name → show id tail (matches disk/oplog gauges). */
+function clusterDisplayName(all, c) {
+  const same = all.filter((x) => x.name === c.name).length;
+  if (same > 1 && c._id) {
+    return `${c.name} (${String(c._id).slice(-6)})`;
+  }
+  return c.name;
+}
+
 async function loadClusters() {
   const list = document.getElementById("clusterList");
   try {
     await loadTopologies();
     const res = await fetch(`${API}/api/clusters`);
     clusters = await res.json();
+    populateClusterEditSelect();
     if (!clusters.length) {
       list.innerHTML = '<li class="empty">No clusters registered yet.</li>';
       return;
     }
     list.innerHTML = clusters
-      .map((c) => `
+      .map((c) => {
+        const displayName = clusterDisplayName(clusters, c);
+        return `
       <li>
         <div class="cluster-header">
           <div>
-            <span class="cluster-name">${c.name}</span>
-            <span class="cluster-meta"> — ${c.region}</span>
+            <span class="cluster-name">${displayName}</span>
+            <span class="cluster-meta"> — ${escAttr(c.region || "")}</span>
             ${c.atlasProjectId ? `<a class="atlas-link" href="https://cloud.mongodb.com/v2/${c.atlasProjectId}#/clusters/detail/${c.name}" target="_blank">Atlas Console</a>` : ""}
           </div>
           <button class="btn btn-sm" onclick="removeCluster('${c._id}')">Remove</button>
         </div>
         ${renderTopology(c._id)}
-      </li>`)
+      </li>`;
+      })
       .join("");
   } catch {
+    clusters = [];
+    populateClusterEditSelect();
     list.innerHTML = '<li class="empty">Failed to load clusters.</li>';
   }
 }
@@ -885,20 +945,30 @@ async function rediscover(clusterId) {
 document.getElementById("addForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
-  await fetch(`${API}/api/clusters`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: form.get("name"),
-      uri: form.get("uri"),
-      region: form.get("region"),
-      atlasProjectId: form.get("atlasProjectId") || undefined,
-      atlasPublicKey: form.get("atlasPublicKey") || undefined,
-      atlasPrivateKey: form.get("atlasPrivateKey") || undefined,
-    }),
-  });
-  e.target.reset();
-  loadClusters();
+  try {
+    const res = await fetch(`${API}/api/clusters`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: form.get("name"),
+        uri: form.get("uri"),
+        region: form.get("region"),
+        atlasProjectId: form.get("atlasProjectId") || undefined,
+        atlasPublicKey: form.get("atlasPublicKey") || undefined,
+        atlasPrivateKey: form.get("atlasPrivateKey") || undefined,
+      }),
+    });
+    const errBody = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showClusterFormFeedback(errBody.error || `Could not add cluster (${res.status})`, true);
+      return;
+    }
+    e.target.reset();
+    showClusterFormFeedback("Cluster registered.", false);
+    loadClusters();
+  } catch (err) {
+    showClusterFormFeedback(err.message || "Network error", true);
+  }
 });
 
 async function removeCluster(id) {
@@ -906,7 +976,99 @@ async function removeCluster(id) {
   loadClusters();
 }
 
+document.getElementById("clusterEditSelect")?.addEventListener("change", async () => {
+  const sel = document.getElementById("clusterEditSelect");
+  const form = document.getElementById("clusterEditForm");
+  if (!sel || !form) return;
+  const id = sel.value;
+  if (!id) {
+    form.reset();
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/api/clusters/${id}`);
+    const c = await res.json();
+    if (!res.ok) return;
+    const q = (n) => form.querySelector(`[name="${n}"]`);
+    if (q("name")) q("name").value = c.name || "";
+    if (q("region")) q("region").value = c.region && c.region !== "unknown" ? c.region : "";
+    if (q("uri")) q("uri").value = "";
+    if (q("atlasProjectId")) q("atlasProjectId").value = c.atlasProjectId || "";
+    if (q("atlasPublicKey")) q("atlasPublicKey").value = c.atlasPublicKey || "";
+    if (q("atlasPrivateKey")) q("atlasPrivateKey").value = "";
+  } catch {
+    /* ignore */
+  }
+});
+
+document.getElementById("clusterEditForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const sel = document.getElementById("clusterEditSelect");
+  const form = e.target;
+  const id = sel?.value;
+  if (!id) {
+    showClusterFormFeedback("Select a cluster first.", true);
+    return;
+  }
+  const fd = new FormData(form);
+  const body = {
+    name: (fd.get("name") || "").trim(),
+    region: (fd.get("region") || "").trim() || "unknown",
+    atlasProjectId: (fd.get("atlasProjectId") || "").trim() || null,
+    atlasPublicKey: (fd.get("atlasPublicKey") || "").trim() || null,
+  };
+  const uri = (fd.get("uri") || "").trim();
+  if (uri) body.uri = uri;
+  const apk = (fd.get("atlasPrivateKey") || "").trim();
+  if (apk) body.atlasPrivateKey = apk;
+  try {
+    const res = await fetch(`${API}/api/clusters/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const errBody = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showClusterFormFeedback(errBody.error || `Update failed (${res.status})`, true);
+      return;
+    }
+    form.querySelector('[name="uri"]').value = "";
+    form.querySelector('[name="atlasPrivateKey"]').value = "";
+    document.getElementById("clusterEditPanel")?.setAttribute("hidden", "");
+    showClusterFormFeedback("Cluster updated.", false);
+    loadClusters();
+  } catch (err) {
+    showClusterFormFeedback(err.message || "Network error", true);
+  }
+});
+
+document.getElementById("toggleEditClusterPanel")?.addEventListener("click", () => {
+  const panel = document.getElementById("clusterEditPanel");
+  if (!panel) return;
+  const open = panel.hasAttribute("hidden");
+  if (open) {
+    panel.removeAttribute("hidden");
+    document.getElementById("clusterEditSelect")?.focus();
+  } else {
+    panel.setAttribute("hidden", "");
+  }
+});
+
+document.getElementById("cancelClusterEdit")?.addEventListener("click", () => {
+  document.getElementById("clusterEditPanel")?.setAttribute("hidden", "");
+});
+
 // ─── Disk Usage ─────────────────────────────────────────────────────
+
+/** Same display name for two registered clusters → disambiguate with id tail */
+function gaugeClusterLabel(data, d) {
+  const same = data.filter((x) => x.clusterName === d.clusterName).length;
+  if (same > 1 && d.clusterId) {
+    const id = String(d.clusterId);
+    return `${d.clusterName} (${id.slice(-6)})`;
+  }
+  return d.clusterName;
+}
 
 function diskLevel(pct) {
   if (pct >= 85) return "danger";
@@ -939,10 +1101,11 @@ async function loadDiskUsage() {
 
     container.innerHTML = data.map((d) => {
       const lvl = diskLevel(d.usagePct);
+      const label = gaugeClusterLabel(data, d);
       return `
         <div class="disk-gauge">
           <div class="disk-gauge-header">
-            <span class="disk-gauge-name">${d.clusterName}</span>
+            <span class="disk-gauge-name">${label}</span>
             <span class="disk-gauge-pct ${lvl}">${d.usagePct}%</span>
           </div>
           <div class="disk-bar"><div class="disk-bar-fill ${lvl}" style="width:${Math.min(d.usagePct, 100)}%"></div></div>
@@ -976,7 +1139,7 @@ async function loadOplogWindow() {
     try {
       data = text ? JSON.parse(text) : [];
     } catch {
-      container.innerHTML = `<span class="empty">Failed to load oplog data: response was not JSON (HTTP ${res.status}). The API may have returned an HTML error page—check the MongoMonitor server logs and application database connection.</span>`;
+      container.innerHTML = `<span class="empty">Failed to load oplog data: response was not JSON (HTTP ${res.status}). The API may have returned an HTML error page—check the MongoAdvisor server logs and application database connection.</span>`;
       return;
     }
     if (!Array.isArray(data)) {
@@ -1011,10 +1174,11 @@ async function loadOplogWindow() {
       const lvl = oplogLevel(d.windowHours);
       const maxBar = 168;
       const barPct = Math.min((d.windowHours / maxBar) * 100, 100);
+      const label = gaugeClusterLabel(data, d);
       return `
         <div class="disk-gauge">
           <div class="disk-gauge-header">
-            <span class="disk-gauge-name">${d.clusterName}</span>
+            <span class="disk-gauge-name">${label}</span>
             <span class="disk-gauge-pct ${lvl}">${d.windowHours}h</span>
           </div>
           <div class="disk-bar"><div class="disk-bar-fill ${lvl}" style="width:${barPct}%"></div></div>
@@ -1028,7 +1192,7 @@ async function loadOplogWindow() {
     }).join("");
   } catch {
     container.innerHTML =
-      '<span class="empty">Failed to load oplog data: network error or request was blocked. Check that the MongoMonitor server is reachable.</span>';
+      '<span class="empty">Failed to load oplog data: network error or request was blocked. Check that the MongoAdvisor server is reachable.</span>';
   }
 }
 

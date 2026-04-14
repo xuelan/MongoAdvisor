@@ -1,8 +1,19 @@
 const { Router } = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../db");
+const { isHiddenTopLevelDb } = require("../hidden-dbs");
+const { MONITOR_LOGS } = require("../monitor-log");
 
 const router = Router();
+
+/** Driver appName for this service; keep in DB but hide from metrics APIs / UI. */
+const SYSTEM_APP_NAME_REGEX = /^mongoadvisor$/i;
+
+function matchExcludeSystemAppName(base = {}) {
+  const exclude = { appName: { $not: SYSTEM_APP_NAME_REGEX } };
+  if (!base || Object.keys(base).length === 0) return exclude;
+  return { $and: [base, exclude] };
+}
 
 function buildFilter(query, { includeHost = true } = {}) {
   const filter = {};
@@ -25,7 +36,12 @@ router.get("/namespaces", async (_req, res, next) => {
     const namespaces = await getDb()
       .collection("query_stats")
       .distinct("namespace");
-    res.json(namespaces.filter(Boolean).sort());
+    res.json(
+      namespaces
+        .filter(Boolean)
+        .filter((ns) => !isHiddenTopLevelDb(ns.split(".")[0]))
+        .sort(),
+    );
   } catch (err) {
     next(err);
   }
@@ -48,7 +64,7 @@ router.get("/hosts", async (_req, res, next) => {
 // GET /api/metrics/query-stats?clusterId=X&since=ISO&namespace=db.coll
 router.get("/query-stats", async (req, res, next) => {
   try {
-    const filter = buildFilter(req.query);
+    const filter = matchExcludeSystemAppName(buildFilter(req.query));
 
     const docs = await getDb()
       .collection("query_stats")
@@ -66,7 +82,7 @@ router.get("/query-stats", async (req, res, next) => {
 // GET /api/metrics/slow-queries?clusterId=X&since=ISO&namespace=db.coll
 router.get("/slow-queries", async (req, res, next) => {
   try {
-    const filter = buildFilter(req.query);
+    const filter = matchExcludeSystemAppName(buildFilter(req.query));
 
     const docs = await getDb()
       .collection("slow_queries")
@@ -84,7 +100,7 @@ router.get("/slow-queries", async (req, res, next) => {
 // GET /api/metrics/app-load?clusterId=X&namespace=db.coll&since=ISO
 router.get("/app-load", async (req, res, next) => {
   try {
-    const matchStage = buildFilter(req.query);
+    const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
       { $match: matchStage },
@@ -127,7 +143,7 @@ router.get("/app-load", async (req, res, next) => {
 // GET /api/metrics/app-analysis?clusterId=X&namespace=db.coll&since=ISO
 router.get("/app-analysis", async (req, res, next) => {
   try {
-    const matchStage = buildFilter(req.query);
+    const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
       { $match: matchStage },
@@ -308,7 +324,7 @@ router.get("/app-analysis", async (req, res, next) => {
 // GET /api/metrics/impact-by-query?clusterId=X&namespace=db.coll&since=ISO
 router.get("/impact-by-query", async (req, res, next) => {
   try {
-    const matchStage = buildFilter(req.query);
+    const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
       { $match: matchStage },
@@ -352,7 +368,7 @@ router.get("/impact-by-query", async (req, res, next) => {
 // Sourced from slow_queries (Atlas Logs API): cpuNanos for CPU, bytesRead for IO
 router.get("/heatmap", async (req, res, next) => {
   try {
-    const matchStage = buildFilter(req.query);
+    const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
       { $match: matchStage },
@@ -407,7 +423,7 @@ router.get("/heatmap", async (req, res, next) => {
 // GET /api/metrics/bubble — top 20 appName+comment from slow_queries for bubble chart
 router.get("/bubble", async (req, res, next) => {
   try {
-    const matchStage = buildFilter(req.query);
+    const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
       { $match: matchStage },
@@ -500,6 +516,27 @@ router.get("/redundant-indexes", async (req, res, next) => {
   }
 });
 
+// GET /api/metrics/monitor-logs — MongoAdvisor collector / API audit trail
+router.get("/monitor-logs", async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit || "200", 10) || 200, 1), 1000);
+    const filter = {};
+    if (req.query.clusterId) filter.clusterId = new ObjectId(req.query.clusterId);
+    if (req.query.since) filter.timestamp = { $gte: new Date(req.query.since) };
+    if (req.query.action) filter.action = String(req.query.action);
+    if (req.query.outcome) filter.outcome = String(req.query.outcome);
+    const docs = await getDb()
+      .collection(MONITOR_LOGS)
+      .find(filter)
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .toArray();
+    res.json(docs);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/metrics/storage — collection-level storage and fragmentation
 router.get("/storage", async (req, res, next) => {
   try {
@@ -525,9 +562,12 @@ router.get("/disk-usage", async (_req, res, next) => {
     const docs = await getDb()
       .collection("disk_usage")
       .aggregate([
+        { $match: { clusterId: { $exists: true, $ne: null } } },
         { $sort: { timestamp: -1 } },
+        // Normalize id so ObjectId vs string (e.g. after restore) does not split one cluster into two rows
+        { $addFields: { _cid: { $toString: "$clusterId" } } },
         { $group: {
-          _id: "$clusterId",
+          _id: "$_cid",
           clusterName: { $first: "$clusterName" },
           timestamp: { $first: "$timestamp" },
           fsTotalSizeBytes: { $first: "$fsTotalSizeBytes" },
@@ -535,7 +575,17 @@ router.get("/disk-usage", async (_req, res, next) => {
           fsFreeBytes: { $first: "$fsFreeBytes" },
           usagePct: { $first: "$usagePct" },
         }},
-        { $project: { _id: 0, clusterName: 1, timestamp: 1, fsTotalSizeBytes: 1, fsUsedSizeBytes: 1, fsFreeBytes: 1, usagePct: 1 } },
+        { $sort: { clusterName: 1 } },
+        { $project: {
+          _id: 0,
+          clusterId: "$_id",
+          clusterName: 1,
+          timestamp: 1,
+          fsTotalSizeBytes: 1,
+          fsUsedSizeBytes: 1,
+          fsFreeBytes: 1,
+          usagePct: 1,
+        }},
       ])
       .toArray();
     res.json(docs);
@@ -550,16 +600,27 @@ router.get("/oplog-window", async (_req, res, next) => {
     const docs = await getDb()
       .collection("oplog_window")
       .aggregate([
+        { $match: { clusterId: { $exists: true, $ne: null } } },
         { $sort: { timestamp: -1 } },
+        { $addFields: { _cid: { $toString: "$clusterId" } } },
         { $group: {
-          _id: "$clusterId",
+          _id: "$_cid",
           clusterName: { $first: "$clusterName" },
           timestamp: { $first: "$timestamp" },
           windowHours: { $first: "$windowHours" },
           oldestTs: { $first: "$oldestTs" },
           newestTs: { $first: "$newestTs" },
         }},
-        { $project: { _id: 0, clusterName: 1, timestamp: 1, windowHours: 1, oldestTs: 1, newestTs: 1 } },
+        { $sort: { clusterName: 1 } },
+        { $project: {
+          _id: 0,
+          clusterId: "$_id",
+          clusterName: 1,
+          timestamp: 1,
+          windowHours: 1,
+          oldestTs: 1,
+          newestTs: 1,
+        }},
       ])
       .toArray();
     res.json(docs);
