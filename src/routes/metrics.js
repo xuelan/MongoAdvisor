@@ -470,6 +470,41 @@ router.get("/bubble", async (req, res, next) => {
   }
 });
 
+// GET /api/metrics/slow-query-sample?appName=X&comment=Y&since=ISO&namespace=&host=&clusterId=
+// Returns the most recent matching slow_query doc — used by the "Explain" popup to show the
+// actual query body before running explain("executionStats") against a chosen cluster.
+router.get("/slow-query-sample", async (req, res, next) => {
+  try {
+    const base = buildFilter(req.query);
+    const filter = matchExcludeSystemAppName(base);
+
+    const inner = {};
+    if (req.query.appName !== undefined) {
+      // Empty string is a valid appName in the chart ("(no appName)") — match missing/null.
+      inner.appName = req.query.appName === "" ? { $in: [null, ""] } : req.query.appName;
+    }
+    if (req.query.comment !== undefined) {
+      inner.comment = req.query.comment === "" ? { $in: [null, ""] } : req.query.comment;
+    }
+
+    const combined = Object.keys(inner).length
+      ? (filter.$and ? { $and: [...filter.$and, inner] } : { $and: [filter, inner] })
+      : filter;
+
+    const doc = await getDb()
+      .collection("slow_queries")
+      .find(combined)
+      .sort({ millis: -1, timestamp: -1 })
+      .limit(1)
+      .next();
+
+    if (!doc) return res.status(404).json({ error: "No matching slow query found" });
+    res.json(doc);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/metrics/unused-indexes
 router.get("/unused-indexes", async (req, res, next) => {
   try {

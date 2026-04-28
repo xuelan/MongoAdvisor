@@ -1,10 +1,11 @@
 const { Router } = require("express");
 const { ObjectId } = require("mongodb");
+const { EJSON } = require("bson");
 const { getDb } = require("../db");
 const { encrypt, decrypt, isEncrypted } = require("../crypto");
 const { logMonitorEvent } = require("../monitor-log");
 const { createAtlasDatabaseUser, atlasErrorMessage } = require("../atlas-db-users");
-const { removePoolsForCluster } = require("../pool-cache");
+const { removePoolsForCluster, ensureConnected } = require("../pool-cache");
 
 const router = Router();
 const COLLECTION = "clusters";
@@ -244,6 +245,164 @@ router.post("/", async (req, res, next) => {
     res.status(201).json(sanitizeCluster(created));
   } catch (err) {
     next(err);
+  }
+});
+
+// ─── Explain (read-only) ────────────────────────────────────────────
+//
+// POST /api/clusters/:id/explain
+// Body: { namespace: "db.coll", command: <object from slow_queries.command> }
+//
+// The slow-query body captured from Atlas log lines is *Extended JSON*: date values arrive as
+// `{ "$date": "2020-12-31T23:59:59.000Z" }`, ObjectIds as `{ "$oid": "…" }`, etc. The MongoDB
+// wire protocol cannot accept those shapes literally — it expects native BSON types — so we
+// round-trip the whole command through `EJSON.deserialize` before handing it to the driver.
+// Mongosh's `ISODate("…")` is simply the display form of the same BSON `Date` instance.
+
+const ALLOWED_EXPLAIN_OPS = new Set(["find", "aggregate", "count", "distinct"]);
+const ALLOWED_EXPLAIN_VERBOSITY = new Set(["queryPlanner", "executionStats", "allPlansExecution"]);
+
+// Fields that are safe and meaningful to keep in the command we pass to explain.
+// Anything else (session / routing / auth / cluster-time metadata) would either be
+// rejected by the server or leak caller-specific context when re-run elsewhere.
+const META_FIELDS = new Set([
+  "$db",
+  "$clusterTime",
+  "$audit",
+  "lsid",
+  "txnNumber",
+  "autocommit",
+  "startTransaction",
+  "stmtId",
+  "apiVersion",
+  "apiStrict",
+  "apiDeprecationErrors",
+  "mayBypassWriteBlocking",
+  "signature",
+  // Re-added by us as a fresh, explicit value.
+  "maxTimeMS",
+  // Drop the original caller's comment so this explain run doesn't alias their traffic.
+  "comment",
+  // Write concerns have no effect on read commands but can still trip strict servers.
+  "writeConcern",
+]);
+
+function stripMetaFields(cmd) {
+  const out = {};
+  for (const [k, v] of Object.entries(cmd)) {
+    if (META_FIELDS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function hasForbiddenPipelineStage(pipeline) {
+  if (!Array.isArray(pipeline)) return false;
+  return pipeline.some((stage) => {
+    if (!stage || typeof stage !== "object") return false;
+    return Object.prototype.hasOwnProperty.call(stage, "$out") || Object.prototype.hasOwnProperty.call(stage, "$merge");
+  });
+}
+
+router.post("/:id/explain", async (req, res, next) => {
+  let cluster = null;
+  try {
+    const oid = new ObjectId(req.params.id);
+    cluster = await getDb().collection(COLLECTION).findOne({ _id: oid });
+    if (!cluster) return res.status(404).json({ error: "Cluster not found" });
+
+    const body = req.body || {};
+    const namespace = typeof body.namespace === "string" ? body.namespace.trim() : "";
+    const rawCommand = body.command;
+    const verbosity = ALLOWED_EXPLAIN_VERBOSITY.has(body.verbosity) ? body.verbosity : "executionStats";
+    // Cap the user-requested timeout to something sane: 5s lower bound (so we always give
+    // the server room to parse+plan) and 10 minutes upper bound (to prevent runaway explains
+    // from holding an HTTP worker forever).
+    const requestedTimeoutMs = Number(body.timeoutMs);
+    const EXPLAIN_TIMEOUT_MS = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+      ? Math.min(Math.max(requestedTimeoutMs, 5_000), 600_000)
+      : 120_000;
+
+    if (!namespace || !namespace.includes(".")) {
+      return res.status(400).json({ error: "namespace (db.collection) is required" });
+    }
+    if (!rawCommand || typeof rawCommand !== "object" || Array.isArray(rawCommand)) {
+      return res.status(400).json({ error: "command object is required" });
+    }
+
+    const dbName = namespace.slice(0, namespace.indexOf("."));
+
+    // EJSON.deserialize converts `{ $date: "…" }`, `{ $oid: "…" }`, `{ $numberLong: "…" }`
+    // and all other canonical EJSON shapes into native BSON types that the driver/server
+    // understand. Without this step, `$match: { "reviews.date": { $gte: { $date: "…" } } }`
+    // is sent as a literal subdocument with a `$date` field and matches nothing.
+    let deserialized;
+    try {
+      deserialized = EJSON.deserialize(rawCommand, { relaxed: false });
+    } catch (e) {
+      return res.status(400).json({ error: `Failed to deserialize command: ${e.message}` });
+    }
+
+    const cleaned = stripMetaFields(deserialized);
+    const op = Object.keys(cleaned).find((k) => !k.startsWith("$"));
+    if (!op || !ALLOWED_EXPLAIN_OPS.has(op)) {
+      return res
+        .status(400)
+        .json({ error: `Only read-only commands are allowed for explain (${[...ALLOWED_EXPLAIN_OPS].join(", ")})` });
+    }
+    if (op === "aggregate" && hasForbiddenPipelineStage(cleaned.pipeline)) {
+      return res.status(400).json({ error: "Aggregation contains $out or $merge (write stage); refusing to run explain" });
+    }
+
+    // aggregate needs a cursor spec to be a valid command.
+    if (op === "aggregate" && cleaned.cursor == null) {
+      cleaned.cursor = {};
+    }
+
+    const started = Date.now();
+
+    const client = await ensureConnected(cluster);
+    const db = client.db(dbName);
+
+    const result = await db.command(
+      { explain: cleaned, verbosity, maxTimeMS: EXPLAIN_TIMEOUT_MS },
+      { maxTimeMS: EXPLAIN_TIMEOUT_MS },
+    );
+
+    const elapsedMs = Date.now() - started;
+
+    await logMonitorEvent({
+      source: "api",
+      action: "explain.run",
+      outcome: "ok",
+      clusterId: cluster._id,
+      clusterName: cluster.name,
+      targetCollection: "slow_queries",
+      detail: `explain(${verbosity}) on ${namespace} — ${op}`,
+      meta: { namespace, op, verbosity, elapsedMs, timeoutMs: EXPLAIN_TIMEOUT_MS },
+    });
+
+    // Serialize with EJSON so BSON types (Long, Date, ObjectId) survive JSON transport.
+    res.json({
+      ok: true,
+      namespace,
+      op,
+      verbosity,
+      elapsedMs,
+      result: EJSON.serialize(result, { relaxed: true }),
+    });
+  } catch (err) {
+    await logMonitorEvent({
+      source: "api",
+      action: "explain.run",
+      outcome: "error",
+      clusterId: cluster?._id,
+      clusterName: cluster?.name,
+      error: err.message,
+    }).catch(() => {});
+    // Surface the driver's error message so the UI can show why explain failed
+    // (invalid command shape, auth, missing index on explained field, etc.).
+    res.status(400).json({ error: err.message || "Explain failed" });
   }
 });
 

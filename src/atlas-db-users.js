@@ -2,15 +2,20 @@ const { atlasDigestFetch } = require("./atlas-digest");
 
 const PRESETS = {
   backend: {
-    description: "MongoAdvisor application DB user (readWrite on mongoadvisor)",
+    description:
+      "MongoAdvisor application DB user (readWrite on mongoadvisor, readAnyDatabase for same-cluster reads)",
     buildPayload: (projectId, username, password, clusterName) => {
-      // Atlas requires SCRAM users to authenticate against `admin`; roles still target `mongoadvisor`.
+      // Atlas requires SCRAM users to authenticate against `admin`.
+      // readWrite @ mongoadvisor: app telemetry; readAnyDatabase @ admin: optional reads (e.g. sample DBs on this cluster).
       const payload = {
         groupId: projectId,
         username,
         password,
         databaseName: "admin",
-        roles: [{ roleName: "readWrite", databaseName: "mongoadvisor" }],
+        roles: [
+          { roleName: "readWrite", databaseName: "mongoadvisor" },
+          { roleName: "readAnyDatabase", databaseName: "admin" },
+        ],
       };
       if (clusterName) {
         payload.scopes = [{ name: clusterName, type: "CLUSTER" }];

@@ -20,6 +20,13 @@ function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 const limitN = rand(12, 45);
 const sortField = pick(["total_reviews", "avg_price", "demand_density", "total_listings"]);
 
+// Randomized ISODate window on reviews.date — sample_airbnb reviews span 2010-2019.
+// Pick a 2-4 year window each run so $queryStats sees different date literals.
+const REVIEW_FROM_YEAR = rand(2012, 2016);
+const REVIEW_WINDOW_YEARS = rand(2, 4);
+const reviewDateGte = new Date(Date.UTC(REVIEW_FROM_YEAR, 0, 1));
+const reviewDateLte = new Date(Date.UTC(REVIEW_FROM_YEAR + REVIEW_WINDOW_YEARS, 11, 31, 23, 59, 59));
+
 const pipeline = [
   // airbnb_match_reviews_market
   {
@@ -27,6 +34,7 @@ const pipeline = [
       reviews: { $exists: true, $ne: [] },
       price: { $exists: true },
       "address.market": { $exists: true, $ne: "" },
+      last_review: { $gte: reviewDateGte },
     },
   },
 
@@ -34,6 +42,13 @@ const pipeline = [
 
   // airbnb_unwind_reviews
   { $unwind: "$reviews" },
+
+  // airbnb_match_review_date_range
+  {
+    $match: {
+      "reviews.date": { $gte: reviewDateGte, $lte: reviewDateLte },
+    },
+  },
 
   // airbnb_review_time_price_amenity
   {
@@ -162,7 +177,9 @@ async function main() {
     await client.connect();
     const db = client.db("sample_airbnb");
 
-    console.log(`Running seasonal pricing aggregation (sort=${sortField}, limit=${limitN}, preUnwindCap=${SEASON_LISTING_CAP})…\n`);
+    console.log(
+      `Running seasonal pricing aggregation (sort=${sortField}, limit=${limitN}, preUnwindCap=${SEASON_LISTING_CAP}, reviewDate=${reviewDateGte.toISOString().slice(0, 10)}→${reviewDateLte.toISOString().slice(0, 10)})…\n`,
+    );
     const start = Date.now();
 
     const results = await db

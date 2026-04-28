@@ -26,6 +26,13 @@ const limitN = rand(8, 18);
 const sortField = pick(["total_listings", "avg_value_score", "avg_price", "avg_rating"]);
 const priceTiers = [rand(30, 70), rand(100, 200), rand(200, 400)].sort((a, b) => a - b);
 
+// Randomized ISODate range on `last_review` — sample_airbnb reviews span 2010-01 → 2019-03;
+// pick a recent-ish lower bound so $queryStats sees varying literals every run.
+const LAST_REVIEW_YEAR = rand(2014, 2018);
+const LAST_REVIEW_MONTH = rand(1, 12);
+const lastReviewGte = new Date(Date.UTC(LAST_REVIEW_YEAR, LAST_REVIEW_MONTH - 1, 1));
+const lastReviewLte = new Date(Date.UTC(2019, 2, 31, 23, 59, 59)); // dataset ends 2019-03
+
 const pipeline = [
   // airbnb_match_listings_filters
   {
@@ -33,6 +40,7 @@ const pipeline = [
       number_of_reviews: { $gte: minReviews },
       bedrooms: { $gte: minBedrooms },
       "address.country": { $exists: true },
+      last_review: { $gte: lastReviewGte, $lte: lastReviewLte },
     },
   },
 
@@ -215,7 +223,7 @@ async function main() {
     const db = client.db("sample_airbnb");
 
     console.log(
-      `Running 10-stage aggregation (reviews>=${minReviews}, beds>=${minBedrooms}, tiers=${priceTiers}, sort=${sortField}, limit=${limitN}, listingCap=${LISTING_CAP}, hostLookupCap=${HOST_LOOKUP_CAP})…\n`,
+      `Running 10-stage aggregation (reviews>=${minReviews}, beds>=${minBedrooms}, tiers=${priceTiers}, sort=${sortField}, limit=${limitN}, listingCap=${LISTING_CAP}, hostLookupCap=${HOST_LOOKUP_CAP}, lastReview>=${lastReviewGte.toISOString().slice(0, 10)})…\n`,
     );
     const start = Date.now();
 

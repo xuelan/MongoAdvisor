@@ -1,20 +1,28 @@
 # MongoAdvisor
 
-MongoAdvisor rethinks MongoDB observability. Instead of yet another raw metrics or cluster check tool, it continuously analyzes your clusters and delivers actionable recommendations with direct links to the exact playbook you need — turning insight into action in seconds, not hours, not days. So you can keep innovating and scaling.
- 
-Currently the tool supports Replica Sets, Sharded cluster will be added in the future.
+MongoAdvisor rethinks MongoDB observability. Instead of yet another raw-metrics dashboard, it continuously analyzes your clusters and delivers **actionable recommendations** with direct links to the exact playbook — turning insight into action in seconds, not hours. So you can keep innovating and scaling.
 
+**What it collects (per registered cluster):**
 
-Collects `$queryStats`, index metadata, storage metrics, disk usage, and oplog window information from registered clusters; optionally enriches with **Atlas Performance Advisor** slow-query logs when Atlas API keys are supplied. All telemetry is stored in a central MongoDB database and shown in a browser dashboard.
+- `$queryStats` per replica-set member (topology discovered via `hello`).
+- Atlas **Performance Advisor** slow-query log lines (optional — requires a read-only Atlas API key).
+- `$indexStats`, `collStats`, `dbStats` for unused/redundant-index and storage/fragmentation views.
+- Oplog window (first / last `ts` on `local.oplog.rs`) and disk usage.
+
+All telemetry is persisted to a central MongoDB database and surfaced in a browser dashboard served from the same Node process.
+
+> **Deployment scope:** replica sets are fully supported today. Sharded-cluster support is on the [roadmap](#roadmap).
 
 ## Bootstrap (Atlas)
 
 Use this sequence for a **new** deployment. You need **two different programmatic API key pairs**:
 
-| Key | Typical Atlas roles | Used for |
-|-----|---------------------|----------|
+
+| Key                       | Typical Atlas roles                                                                                                      | Used for                                                                                                                         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
 | **Bootstrap / admin key** | Enough privilege to **create database users** on a project (e.g. **Project Owner** or **Project Database Access Admin**) | `npm run atlas:create-user` (steps 1 and 3), or `POST /api/atlas/database-users` / `POST /api/clusters/:id/atlas-database-users` |
-| **Monitoring key** | **Project Read Only** + **Project Data Access Read Only** → API values `GROUP_READ_ONLY`, `GROUP_DATA_ACCESS_READ_ONLY` | Stored in MongoAdvisor per cluster for **Performance Advisor** slow-query logs (`collector.js`) |
+| **Monitoring key**        | **Project Read Only** + **Project Data Access Read Only** → API values `GROUP_READ_ONLY`, `GROUP_DATA_ACCESS_READ_ONLY`  | Stored in MongoAdvisor per cluster for **Performance Advisor** slow-query logs (`collector.js`)                                  |
+
 
 Create the bootstrap key in Atlas **Access Manager** if you do not already have one. The monitoring key is created in step 2 and is **not** the same as the bootstrap key (read-only keys cannot create users).
 
@@ -22,10 +30,10 @@ Create the bootstrap key in Atlas **Access Manager** if you do not already have 
 
 ### 1. Create the backend application user (SCRAM)
 
-Creates `readWrite` on database `mongoadvisor` with SCRAM auth against **`admin`** (Atlas requirement). Pass the **bootstrap** public/private keys (not the monitoring key).
+Creates `readWrite` on `mongoadvisor` plus `readAnyDatabase` on `admin` (SCRAM auth against `admin` — Atlas requirement). Pass the **bootstrap** public/private keys (not the monitoring key).
 
 ```bash
-# databaseName (auth): admin | roles: readWrite @ mongoadvisor
+# databaseName (auth): admin | roles: readWrite @ mongoadvisor, readAnyDatabase @ admin
 export ATLAS_NEW_USER_PASSWORD='...'
 npm run atlas:create-user -- --preset backend \
   --project-id "<BACKEND_ATLAS_PROJECT_ID>" \
@@ -38,7 +46,7 @@ Optional: `--cluster-name "<backend Atlas cluster name>"` scopes the user to one
 
 Alternatives: Atlas UI **Database Access**, or the HTTP API documented under [Atlas database users (CLI and HTTP API)](#atlas-database-users-cli-and-http-api) (same payloads as `npm run atlas:create-user`).
 
-Example **`MONGO_URI`**: `mongodb+srv://mongoadvisor_app:<password>@<host>/mongoadvisor?authSource=admin`
+Example `MONGO_URI`: `mongodb+srv://mongoadvisor_app:<password>@<host>/mongoadvisor?authSource=admin`
 
 ### 2. Create the monitoring programmatic API key (read-only)
 
@@ -67,7 +75,7 @@ If slow-query ingestion returns **403**, confirm roles against current [Atlas pr
 
 ### 3. Create the monitored cluster database user (SCRAM)
 
-Collector connects with this **MongoDB** user (`metrics_reader` pattern). Use **`--preset metrics`** on the **monitored** project; `--cluster-name` must match the **Atlas cluster name**.
+Collector connects with this **MongoDB** user (`metrics_reader` pattern). Use `--preset metrics` on the **monitored** project; `--cluster-name` must match the **Atlas cluster name**.
 
 ```bash
 export ATLAS_NEW_USER_PASSWORD='...'
@@ -85,12 +93,14 @@ Omit `--cluster-name` only if you intentionally want a project-wide database use
 
 Do **not** commit secrets. Locally, copy `.env.example` to `.env`. In production, set the same variable **names** via your platform (Kubernetes secrets, PaaS env, systemd, etc.):
 
-| Variable | Purpose |
-|----------|---------|
-| `MONGO_URI` | From step 1 (`authSource=admin` on Atlas) |
-| `MONGO_DB` | Application database name (default `mongoadvisor`) |
+
+| Variable         | Purpose                                                                          |
+| ---------------- | -------------------------------------------------------------------------------- |
+| `MONGO_URI`      | From step 1 (`authSource=admin` on Atlas)                                        |
+| `MONGO_DB`       | Application database name (default `mongoadvisor`)                               |
 | `ENCRYPTION_KEY` | 64 hex chars — encrypts stored cluster URIs and Atlas private keys in the app DB |
-| `PORT` | Optional (default `3000`) |
+| `PORT`           | Optional (default `3000`)                                                        |
+
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
@@ -132,12 +142,14 @@ npm start
 
 ## Configuration
 
-| Variable | Description |
-|---|---|
-| `MONGO_URI` | Connection string for the **MongoAdvisor backend** database (stores clusters, metrics, encrypted secrets) |
-| `MONGO_DB` | Database name on that cluster (default: `mongoadvisor`) |
-| `PORT` | HTTP port (default: `3000`) |
-| `ENCRYPTION_KEY` | 32-byte hex key for encrypting stored credentials |
+
+| Variable         | Description                                                                                               |
+| ---------------- | --------------------------------------------------------------------------------------------------------- |
+| `MONGO_URI`      | Connection string for the **MongoAdvisor backend** database (stores clusters, metrics, encrypted secrets) |
+| `MONGO_DB`       | Database name on that cluster (default: `mongoadvisor`)                                                   |
+| `PORT`           | HTTP port (default: `3000`)                                                                               |
+| `ENCRYPTION_KEY` | 32-byte hex key for encrypting stored credentials                                                         |
+
 
 Generate an encryption key:
 
@@ -157,14 +169,14 @@ You need **two different identities**: one for the app’s own database, and one
 
 ### 1. Backend application user (`MONGO_URI`)
 
-This user must **read and write** the MongoAdvisor application database (default `mongoadvisor`). Effective access is **`readWrite` on `mongoadvisor`**. On **Atlas**, SCRAM users must use the **`admin`** authentication database (`DATABASE_NAME_INVALID_ADMIN` if you use another auth DB); **`--preset backend`** sets Atlas `databaseName` to **`admin`** and keeps the role on **`mongoadvisor`**. On **self-managed** MongoDB you can still create the user with auth DB `mongoadvisor` if you prefer.
+This user must **read and write** the MongoAdvisor application database (default `mongoadvisor`) and typically needs `readAnyDatabase` on `admin` so the same URI can read other databases on the backend cluster (for example `scripts/workload*.js` against Atlas sample data). On **Atlas**, SCRAM users must use the `admin` authentication database (`DATABASE_NAME_INVALID_ADMIN` if you use another auth DB); `--preset backend` sets Atlas `databaseName` to `admin` with `readWrite` on `mongoadvisor` and `readAnyDatabase` on `admin`. On **self-managed** MongoDB you can grant the same two roles with auth DB `admin` (or narrow reads if you do not need cross-database access).
 
 Create the user on Atlas with the Administration API (Digest auth). Use the **bootstrap** API key pair (must be allowed to create database users), not the read-only monitoring key from bootstrap step 2:
 
 ```bash
 # No --role flag: --preset backend sends these to Atlas (SCRAM):
 #   databaseName (auth): admin   ← required on Atlas
-#   roles: readWrite @ mongoadvisor
+#   roles: readWrite @ mongoadvisor, readAnyDatabase @ admin
 export ATLAS_NEW_USER_PASSWORD='...'
 npm run atlas:create-user -- --preset backend \
   --project-id "<Atlas project ID>" \
@@ -173,21 +185,23 @@ npm run atlas:create-user -- --preset backend \
   --username mongoadvisor_app
 ```
 
-On self-managed hosts, `db.createUser({ user, pwd, roles: [{ role: "readWrite", db: "mongoadvisor" }] })` in the `mongoadvisor` database is equivalent access; this repo’s API maps **`--preset backend`** to the Atlas-safe payload above.
+On self-managed hosts, equivalent roles are `readWrite` on `mongoadvisor` and `readAnyDatabase` on `admin` (often created with auth DB `admin`); this repo's API maps `--preset backend` to the Atlas-safe payload above.
 
 Optional: `--cluster-name "<Atlas cluster name>"` scopes the user to a single cluster in the project.
 
-Example **`MONGO_URI`** after creation on Atlas: `mongodb+srv://mongoadvisor_app:<password>@<host>/mongoadvisor?authSource=admin`
+Example `MONGO_URI` after creation on Atlas: `mongodb+srv://mongoadvisor_app:<password>@<host>/mongoadvisor?authSource=admin`
 
 ### 2. Monitored cluster user (connection string per cluster)
 
 The collector runs commands and aggregations against **each registered cluster**. A minimal **built-in** combination that matches the current code paths is:
 
-| Role | Database | Why |
-|---|---|---|
-| `clusterMonitor` | `admin` | Monitoring commands, `listDatabases`, and `$queryStats` (`queryStatsRead` — see [MongoDB `$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)) |
-| `readAnyDatabase` | `admin` | `listCollections`, `$indexStats`, `collStats` on user databases |
-| `read` | `local` | Read `local.oplog.rs` for oplog window sampling (`readAnyDatabase` does not cover `local`) |
+
+| Role              | Database | Why                                                                                                                                                                                      |
+| ----------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `clusterMonitor`  | `admin`  | Monitoring commands, `listDatabases`, and `$queryStats` (`queryStatsRead` — see [MongoDB `$queryStats](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)`) |
+| `readAnyDatabase` | `admin`  | `listCollections`, `$indexStats`, `collStats` on user databases                                                                                                                          |
+| `read`            | `local`  | Read `local.oplog.rs` for oplog window sampling (`readAnyDatabase` does not cover `local`)                                                                                               |
+
 
 Create with the API script (recommended on Atlas):
 
@@ -214,14 +228,16 @@ Registering a cluster in the UI is always a **new** row (no upsert by name). To 
 
 ### Atlas database users (CLI and HTTP API)
 
-SCRAM users are **not** created from the web UI. Use **`npm run atlas:create-user`** (see [Bootstrap (Atlas)](#bootstrap-atlas)) or call the routes below (same presets as `src/atlas-db-users.js`). Optional server env **`ATLAS_BACKEND_PROJECT_ID`** and **`ATLAS_BACKEND_PUBLIC_KEY`** are exposed via **`GET /api/atlas/database-users/defaults`** so scripts or `curl` can prefill non-secrets only (never put a private API key in `.env` for a browser).
+SCRAM users are **not** created from the web UI. Use `npm run atlas:create-user` (see [Bootstrap (Atlas)](#bootstrap-atlas)) or call the routes below (same presets as `src/atlas-db-users.js`). Optional server env `ATLAS_BACKEND_PROJECT_ID` and `ATLAS_BACKEND_PUBLIC_KEY` are exposed via `GET /api/atlas/database-users/defaults` so scripts or `curl` can prefill non-secrets only (never put a private API key in `.env` for a browser).
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/api/atlas/database-users/presets` | Preset ids and descriptions (`backend`, `metrics`). |
-| `GET` | `/api/atlas/database-users/defaults` | JSON `{ projectId, publicKey }` from optional env (non-secrets only). |
-| `POST` | `/api/atlas/database-users` | Body: `preset`, `projectId`, `publicKey`, `privateKey`, `username`, `password`, optional `clusterName` (Atlas cluster name for scope). |
+
+| Method | Path                                     | Purpose                                                                                                                                                                                                                    |
+| ------ | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/api/atlas/database-users/presets`      | Preset ids and descriptions (`backend`, `metrics`).                                                                                                                                                                        |
+| `GET`  | `/api/atlas/database-users/defaults`     | JSON `{ projectId, publicKey }` from optional env (non-secrets only).                                                                                                                                                      |
+| `POST` | `/api/atlas/database-users`              | Body: `preset`, `projectId`, `publicKey`, `privateKey`, `username`, `password`, optional `clusterName` (Atlas cluster name for scope).                                                                                     |
 | `POST` | `/api/clusters/:id/atlas-database-users` | Uses **stored** Atlas Project ID + API keys on that cluster. Body: `username`, `password`, optional `preset` (default `metrics`), optional `scopeToCluster` (default `true` → scope to the cluster’s registered **name**). |
+
 
 The stock server does **not** add HTTP authentication to these routes; treat them like the rest of the admin API and protect them at the network or proxy layer.
 
@@ -255,16 +271,50 @@ Slow-query log lines are fetched with the **Atlas Admin API** (keys in the UI), 
 
 Embedded pollers run on fixed intervals (see `src/collector.js`):
 
-| Collector | Interval | Source | Stored as |
-|---|---|---|---|
-| `$queryStats` + topology | 5 min | Each replica member via `directConnection`; `hello` on default connection | `query_stats`, `topologies` |
-| Atlas slow query logs | 10 min | Performance Advisor API per host (if keys set) | `slow_queries` |
-| `$indexStats` (unused / redundant) | 10 min | Per host / primary | `index_stats` |
-| Disk usage (`dbStats` on `admin`) | 10 min | Cluster connection | `disk_usage` |
-| Oplog window | 10 min | First/last `ts` on `local.oplog.rs` | `oplog_window` |
-| Storage & fragmentation (`collStats`) | Daily ~3:00 local; once on startup if empty | Cluster connection | `storage_stats` |
+
+| Collector                             | Interval                                    | Source                                                                    | Stored as                   |
+| ------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------- | --------------------------- |
+| `$queryStats` + topology              | 5 min                                       | Each replica member via `directConnection`; `hello` on default connection | `query_stats`, `topologies` |
+| Atlas slow query logs                 | 10 min                                      | Performance Advisor API per host (if keys set)                            | `slow_queries`              |
+| `$indexStats` (unused / redundant)    | 10 min                                      | Per host / primary                                                        | `index_stats`               |
+| Disk usage (`dbStats` on `admin`)     | 10 min                                      | Cluster connection                                                        | `disk_usage`                |
+| Oplog window                          | 10 min                                      | First/last `ts` on `local.oplog.rs`                                       | `oplog_window`              |
+| Storage & fragmentation (`collStats`) | Daily ~3:00 local; once on startup if empty | Cluster connection                                                        | `storage_stats`             |
+
 
 Queries from internal agents (`MongoDB Automation Agent`, `MongoDB Monitoring Module`) are filtered at ingestion for `$queryStats`.
+
+
+
+### Stored document timestamp (query_stats and slow_queries)
+
+Time filters (`since`, time range in the UI) and sorts use the `timestamp` field on each stored row. It does **not** always mean "the instant that user query finished":
+
+| Collection | What `timestamp` represents |
+| --- | --- |
+| `query_stats` | Prefer `metrics.latestSeenTimestamp`: UTC when the server last **observed activity** for this stats key (still aggregated — not a single query's "finished at" instant). If missing, use `asOf`: UTC when that partition row was read from the [`$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/) virtual collection (also not per-query event time). Then **poll time**. `metrics.lastExecutionMicros` is execution *duration*, not a calendar time — it is not used as `timestamp`. |
+| `slow_queries` | Prefer the **log event time** parsed from the Performance Advisor line (MongoDB structured log field `t`). If that cannot be parsed, `timestamp` is the **collector run time** when the slow-query batch was ingested. |
+
+Metrics routes filter with `since` against this same `timestamp` field.
+
+### UTC and timestamps (database vs UI)
+
+**MongoDB (application database)**  
+BSON **Date** values represent a **single instant in time** (internally: milliseconds since the Unix epoch). Tools such as Compass usually render that as **UTC ISO** (suffix `Z` or `+00:00`). That is a **display convention** for the same moment you would read on a wall clock in any timezone, not a second parallel timeline.
+
+
+| Source                       | What you see / store                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query_stats.timestamp` | Prefer `metrics.latestSeenTimestamp`, then `asOf`, then `new Date()` at poll time ([`$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)). The collector reads `latestSeenTimestamp` from the same **cloned** `metrics` subdocument that is stored (EJSON round-trip can change BSON shapes from the raw cursor), so `timestamp` matches `metrics.latestSeenTimestamp` when that field is present and parseable. `asOf` is partition read time, not a single-query event time. |
+| `slow_queries.timestamp` | Prefer log event time from structured field `t` in [MongoDB log lines](https://www.mongodb.com/docs/manual/reference/log-messages/) (UTC in JSON). If unparsed, collector ingest time. |
+| `monitor_logs.timestamp` | Set when the row is written (`new Date()` on the Node process). Still a BSON instant; server OS timezone does not create a second stored clock. |
+
+
+**Dashboard UI (`public/app.js`)**  
+
+- **Filtering:** For 5 min / 1 h / 1 d / 1 w, the client sends `since` as `new Date(Date.now() - rangeMs).toISOString()`. That means: **current instant from the browser** minus a **duration**, encoded as **UTC ISO** for the query string. The API uses `new Date(since)` and compares to `timestamp` — same instant math everywhere (Paris 11:44 and `09:44Z` are the same "now"; the window edge is one hour earlier in real time, not "subtract 1 from the local hour digit only").
+- **"All"** clears `since` so metrics APIs can return rows from any `timestamp`.
+- **Labels only:** Disk usage and oplog panels use `toLocaleString()` for "Updated" / oplog bounds so the **browser shows local wall time** for humans. That does **not** change `since` or database values.
 
 ## Dashboard
 
@@ -282,45 +332,87 @@ The frontend (`public/`) uses Chart.js. Highlights:
 
 Charts that use query stats or slow queries honor:
 
-| Filter | Description |
-|---|---|
-| **Time range** | 5 min, 1 hour, 1 day, 1 week, or all |
-| **Nodes** | One checkbox per replica set member (from topology) |
-| **Namespaces** | `db.collection`; system DBs including `mongoadvisor` and legacy `mongomonitor` hidden from the picker (see `src/hidden-dbs.js`) |
+
+| Filter         | Description                                                                                                |
+| -------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Time range** | 5 min, 1 hour, 1 day, 1 week, or all                                                                       |
+| **Nodes**      | One checkbox per replica set member (from topology)                                                        |
+| **Namespaces** | `db.collection`; system DBs and the app DB `mongoadvisor` hidden from the picker (see `src/hidden-dbs.js`) |
+
 
 ## API endpoints
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/health` | Ping application database |
-| `GET` | `/api/clusters` | List clusters (secrets masked) |
-| `POST` | `/api/clusters` | Register a cluster |
-| `GET` | `/api/clusters/:id` | One cluster |
-| `PATCH` | `/api/clusters/:id` | Update cluster (`name`, `region`, `uri`, Atlas fields; omit `uri` / `atlasPrivateKey` to leave unchanged) |
-| `DELETE` | `/api/clusters/:id` | Remove cluster |
-| `POST` | `/api/clusters/:id/atlas-database-users` | Create Atlas SCRAM user using stored cluster Atlas API keys |
-| `GET` | `/api/atlas/database-users/presets` | Preset ids for Atlas SCRAM user creation |
-| `GET` | `/api/atlas/database-users/defaults` | Optional `{ projectId, publicKey }` from server env (for scripts / `curl`) |
-| `POST` | `/api/atlas/database-users` | Create Atlas SCRAM user (credentials in JSON body) |
-| `GET` | `/api/topologies` | All topologies |
-| `POST` | `/api/topologies/:id/discover` | Refresh topology |
-| `GET` | `/api/metrics/namespaces` | Distinct namespaces for filters |
-| `GET` | `/api/metrics/hosts` | Distinct hosts from topology |
-| `GET` | `/api/metrics/app-load` | Aggregated load by appName |
-| `GET` | `/api/metrics/query-stats` | Raw `$queryStats`-backed snapshots |
-| `GET` | `/api/metrics/app-analysis` | App-level analysis aggregates |
-| `GET` | `/api/metrics/impact-by-query` | Per-query impact metrics |
-| `GET` | `/api/metrics/heatmap` | Heatmap payload (IO/CPU grouping) |
-| `GET` | `/api/metrics/bubble` | Bubble chart payload |
-| `GET` | `/api/metrics/slow-queries` | Slow query log documents |
-| `GET` | `/api/metrics/unused-indexes` | Unused index rows |
-| `GET` | `/api/metrics/redundant-indexes` | Redundant index rows |
-| `GET` | `/api/metrics/storage` | Storage / fragmentation rows |
-| `GET` | `/api/metrics/disk-usage` | Latest disk usage per cluster |
-| `GET` | `/api/metrics/oplog-window` | Latest oplog window per cluster |
-| `GET` | `/api/metrics/monitor-logs` | Collector/API audit (`?limit=`, `?since=`, `?clusterId=`, `?action=`, `?outcome=`) |
 
-Common query parameters: `since` (ISO date), `namespace` (repeatable), `host` (repeatable), `clusterId`.
+| Method   | Endpoint                                 | Description                                                                                               |
+| -------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/health`                            | Ping application database                                                                                 |
+| `GET`    | `/api/clusters`                          | List clusters (secrets masked)                                                                            |
+| `POST`   | `/api/clusters`                          | Register a cluster                                                                                        |
+| `GET`    | `/api/clusters/:id`                      | One cluster                                                                                               |
+| `PATCH`  | `/api/clusters/:id`                      | Update cluster (`name`, `region`, `uri`, Atlas fields; omit `uri` / `atlasPrivateKey` to leave unchanged) |
+| `DELETE` | `/api/clusters/:id`                      | Remove cluster                                                                                            |
+| `POST`   | `/api/clusters/:id/atlas-database-users` | Create Atlas SCRAM user using stored cluster Atlas API keys                                               |
+| `GET`    | `/api/atlas/database-users/presets`      | Preset ids for Atlas SCRAM user creation                                                                  |
+| `GET`    | `/api/atlas/database-users/defaults`     | Optional `{ projectId, publicKey }` from server env (for scripts / `curl`)                                |
+| `POST`   | `/api/atlas/database-users`              | Create Atlas SCRAM user (credentials in JSON body)                                                        |
+| `GET`    | `/api/topologies`                        | All topologies                                                                                            |
+| `POST`   | `/api/topologies/:id/discover`           | Refresh topology                                                                                          |
+| `GET`    | `/api/metrics/namespaces`                | Distinct namespaces for filters                                                                           |
+| `GET`    | `/api/metrics/hosts`                     | Distinct hosts from topology                                                                              |
+| `GET`    | `/api/metrics/app-load`                  | Aggregated load by appName                                                                                |
+| `GET`    | `/api/metrics/query-stats`               | Raw `$queryStats`-backed snapshots                                                                        |
+| `GET`    | `/api/metrics/app-analysis`              | App-level analysis aggregates                                                                             |
+| `GET`    | `/api/metrics/impact-by-query`           | Per-query impact metrics                                                                                  |
+| `GET`    | `/api/metrics/heatmap`                   | Heatmap payload (IO/CPU grouping)                                                                         |
+| `GET`    | `/api/metrics/bubble`                    | Bubble chart payload                                                                                      |
+| `GET`    | `/api/metrics/slow-queries`              | Slow query log documents                                                                                  |
+| `GET`    | `/api/metrics/unused-indexes`            | Unused index rows                                                                                         |
+| `GET`    | `/api/metrics/redundant-indexes`         | Redundant index rows                                                                                      |
+| `GET`    | `/api/metrics/storage`                   | Storage / fragmentation rows                                                                              |
+| `GET`    | `/api/metrics/disk-usage`                | Latest disk usage per cluster                                                                             |
+| `GET`    | `/api/metrics/oplog-window`              | Latest oplog window per cluster                                                                           |
+| `GET`    | `/api/metrics/monitor-logs`              | Collector/API audit (`?limit=`, `?since=`, `?clusterId=`, `?action=`, `?outcome=`)                        |
+
+
+Common query parameters: `since` (ISO date, compared to each document's `timestamp` — see [Stored document timestamp (query_stats and slow_queries)](#stored-document-timestamp-query_stats-and-slow_queries)), `namespace` (repeatable), `host` (repeatable), `clusterId`.
+
+## Application database indexes
+
+Indexes are **not** created when the server starts. Run them manually after deploy or when the README index list changes:
+
+```bash
+npm run indexes:ensure
+# Or: node scripts/ensure-indexes.js
+```
+
+Uses `MONGO_URI` and `MONGO_DB` from `.env` (same as the app). The script is [`scripts/ensure-indexes.js`](scripts/ensure-indexes.js); it does **not** run from [`src/db.js`](src/db.js).
+
+
+| Collection      | Index name                         | Keys                                                            | Unique        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------- | ---------------------------------- | --------------------------------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query_stats`   | `uniq_query_stats_observation`     | `clusterId`, `host`, `timestamp`, `keyHash`, `queryShapeHash`   | yes           | One stored row per observation key **including `timestamp`**. Stored `timestamp` prefers `metrics.latestSeenTimestamp`, then `asOf`, then poll time ([`$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)). `bulkWrite` upserts use this full key set. When `latestSeenTimestamp` moves forward, a **new** row can appear (new instant in the compound key). `keyHash` may be null on older servers. |
+| `slow_queries`  | `uniq_slow_log_dedupe`             | `clusterId`, `host`, `id`, `timestamp`, `millis`, `ctx`         | yes (partial) | Same logical key as `{ id, timestamp, millis, ctx, host }` plus `clusterId` so tenants do not collide. Partial index applies only when `id` is numeric ([log messages](https://www.mongodb.com/docs/manual/reference/log-messages/#filtering-by-known-log-id)). The collector `bulkWrite` upserts on that key set; `ctx` is stored as `""` when missing. Rows without a numeric `id` are `insertMany` only (not in the partial unique set — duplicates possible on re-poll). |
+| `topologies`    | `uniq_topology_per_cluster`        | `clusterId`                                                     | yes           | At most one topology document per cluster.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `monitor_logs`  | `monitor_logs_timestamp`           | `timestamp` (desc)                                              | no            | Recent audit rows for `/api/metrics/monitor-logs`.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `index_stats`   | `index_stats_cluster_type_host_ns` | `clusterId`, `type`, `host`, `namespace`                        | no            | Unused / redundant index listings.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `storage_stats` | `storage_stats_cluster_ns`         | `clusterId`, `namespace`                                        | no            | Storage scan rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `disk_usage`    | `disk_usage_cluster_time`          | `clusterId`, `timestamp` (desc)                                 | no            | Latest disk samples per cluster.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `oplog_window`  | `oplog_window_cluster_time`        | `clusterId`, `timestamp` (desc)                                 | no            | Latest oplog window samples.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+
+
+All collections also have the default `_id` index. `clusters` is not listed above (only `_id` unless you add your own).
+
+If `createIndex` fails (usually duplicate keys in existing data), clean duplicates or drop conflicting indexes, then run `npm run indexes:ensure` again.
+
+### Slow query document fields (log-derived)
+
+
+| Field       | Source                                                                                                               |
+| ----------- | -------------------------------------------------------------------------------------------------------------------- |
+| `id`        | Top-level `id` in the JSON slow-operation log line (integer), when present. |
+| `ctx`       | Top-level `ctx` (e.g. connection thread id). Stored as `""` when missing so the unique index remains stable. |
+| `truncated` | `true` / `false` when the log exposes a `truncated` field (top-level or under `attr`); omitted when not present. |
+
 
 ## Project structure
 
@@ -345,53 +437,80 @@ public/
 └── style.css
 
 scripts/
-├── workload.js        # Runs all workloads (random read preference)
-├── workload-agg.js    # sample_airbnb analytics pipeline
-├── workload-agg2.js   # sample_airbnb seasonal pipeline
-└── workload-mflix.js  # sample_mflix aggregations
+├── ensure-indexes.js       # npm run indexes:ensure — app DB indexes (not run on server start)
+├── workload.js             # Orchestrator: runs all workloads in parallel
+├── workload-agg.js         # sample_airbnb analytics pipeline
+├── workload-agg2.js        # sample_airbnb seasonal pipeline
+├── workload-mflix.js       # sample_mflix mixed aggregate + find workloads
+└── workload-mflix-fast.js  # sample_mflix fast, index-only loop (default 5 min)
 ```
 
 ## Workload generation
 
-Scripts target sample datasets (`sample_airbnb`, `sample_mflix`). Each run randomly uses `primary` or `secondary` read preference when possible.
+Scripts target the Atlas sample datasets (`sample_airbnb`, `sample_mflix`) so you have something meaningful to observe while developing or demoing. Every query sets a descriptive `appName` and `comment`, so you can slice the resulting `$queryStats` and Atlas slow-log rows by logical workload in the dashboard.
+
+### Available scripts
+
+| Script | Dataset | What it does |
+| --- | --- | --- |
+| `workload.js` | all | Runs the other three scripts in parallel with a randomized iteration count. |
+| `workload-agg.js` | `sample_airbnb` | Heavy host/listings lookup + group pipeline. |
+| `workload-agg2.js` | `sample_airbnb` | Reviews unwind + seasonal rollups pipeline. |
+| `workload-mflix.js` | `sample_mflix` | Mixed aggregate + find workloads across mflix collections (intentionally includes some heavy shapes). |
+| `workload-mflix-fast.js` | `sample_mflix` | **Fast, index-only** loop across every mflix collection. Runs for 5 minutes by default and only uses existing indexes (`cast`, `cast+runtime`, `genres`, `rated`, `runtime`, `email`, `user_id`, `location.geo` 2dsphere, `_id`, text index). |
+
+### Usage
 
 ```bash
-node scripts/workload.js          # All workloads (default 10 iterations each)
-node scripts/workload.js 5        # 5 base iterations
+# Run the orchestrator (executes all workload scripts in parallel)
+node scripts/workload.js          # default 10 iterations each
+node scripts/workload.js 5        # 5 base iterations each
+
+# Run a single workload
 node scripts/workload-agg.js
 node scripts/workload-agg2.js
 node scripts/workload-mflix.js
-node scripts/workload-mflix.js 3  # Single pipeline by index
+node scripts/workload-mflix.js 3  # single pipeline (1-indexed) from the mflix list
+
+# Fast, index-only mflix loop (5 minutes by default)
+node scripts/workload-mflix-fast.js
+DURATION_MS=60000 node scripts/workload-mflix-fast.js   # 1 minute
 ```
 
-Connections set `appName` and `comment` for traceability in Atlas logs and `$queryStats`.
+### Useful environment variables
+
+| Variable | Script(s) | Purpose |
+| --- | --- | --- |
+| `READ_PREF` | all | Force `primary` or `secondary`; randomized per run otherwise. |
+| `DURATION_MS` | `workload-mflix-fast.js` | Total run time in ms (default `300000`). |
+| `MIN_SLEEP_MS` / `MAX_SLEEP_MS` | `workload-mflix-fast.js` | Jitter between ops (defaults `80` / `350`). |
+| `MAX_TIME_MS` | `workload-mflix-fast.js` | Per-query `maxTimeMS` cap (default `5000`). |
+| `MFLIX_EMBEDDED_CAP` / `MFLIX_LOOKUP_CAP` / `MFLIX_OUTLIER_CAP` | `workload-mflix.js` | Shrink pipeline working sets to keep latency reasonable on small clusters. |
+| `AIRBNB_SEASON_CAP` | `workload-agg2.js` | Cap listings processed before `$unwind: $reviews`. |
+
+The fast mflix loop uses a distinct `appName` per query template (for example `workload-mflix-fast-em-cast`, `workload-mflix-fast-theaters-near`, `workload-mflix-fast-movies-text`), so each index-backed shape shows up as its own entry in the dashboard’s per-app charts.
 
 ## Security — credential encryption
 
 Source cluster URIs and Atlas private API keys are **encrypted at rest** (AES-256-GCM) before storage in the backend database.
 
-| Layer | `uri` | `atlasPrivateKey` |
-|---|---|---|
-| `POST /api/clusters` | Plain text in request | Plain text in request |
-| Database | `iv:authTag:ciphertext` (hex) | Same format |
-| `GET /api/clusters` | Masked | Partially masked |
+
+| Layer                | `uri`                         | `atlasPrivateKey`     |
+| -------------------- | ----------------------------- | --------------------- |
+| `POST /api/clusters` | Plain text in request         | Plain text in request |
+| Database             | `iv:authTag:ciphertext` (hex) | Same format           |
+| `GET /api/clusters`  | Masked                        | Partially masked      |
+
 
 - **Key**: 256-bit hex in `ENCRYPTION_KEY` (never commit `.env`)
 - **Per-value IV**: random 12 bytes per encrypt
 - Rotating `ENCRYPTION_KEY` requires re-encrypting stored values
 
+## Roadmap
 
+1. **Data retention: purge vs. aggregate.** Keep recent metrics hot in the app DB and roll up older metrics; long-term history pushed to S3, Datadog, or similar. Retention windows still to be defined.
+2. **Poll delta vs. full for read and write.** Apply timestamp filtering dynamically on `$queryStats` reads (writes can't be made delta-based); expand `$queryStats` analytics with richer aggregations.
+3. **Safety rails.** Pause metadata-scanning pollers (indexes, storage) when a cluster looks risky to sweep — e.g. very high collection/index counts — to avoid hammering shared infrastructure.
+4. **More indexes.** Add indexes for any new access patterns introduced by future dashboards and API endpoints.
+5. **Sharded cluster support.** Currently only replica sets are covered end-to-end.
 
-## TODO List
-
-1. Data purging VS Aggregation
-- We will only store recent metrics, and aggregation of old metrics, period to be defined.
-- The whole history should be stored in S3 or Datadog etc
-
-2. Poll delta VS full
-- Apply timestamp dynamically on $queryStats
-
-2. Add security check
-- In case of any risk cases, we will stop polling, e.g. massive number of collections and indexes, it could be risky to scan all the metadata for index and storage etc
-
-3. Add indexes

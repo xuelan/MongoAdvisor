@@ -310,8 +310,21 @@ const COMMENT_4 = "mflix_award_cast_crossgenre";
 
 const minWins4 = rand(2, 5);
 const limitP4 = rand(8, 22);
+// Randomized ISODate window on `released` — embedded_movies spans ~1920s-2015.
+// Window start between 1960-1995, length 10-30 years, so $queryStats sees varying literals.
+const RELEASED_FROM_YEAR_4 = rand(1960, 1995);
+const RELEASED_WINDOW_YEARS_4 = rand(10, 30);
+const released4Gte = new Date(Date.UTC(RELEASED_FROM_YEAR_4, 0, 1));
+const released4Lte = new Date(Date.UTC(RELEASED_FROM_YEAR_4 + RELEASED_WINDOW_YEARS_4, 11, 31, 23, 59, 59));
 const pipeline4 = [
-  { $match: { "awards.wins": { $gte: minWins4 }, cast: { $exists: true }, genres: { $exists: true } } },
+  {
+    $match: {
+      "awards.wins": { $gte: minWins4 },
+      cast: { $exists: true },
+      genres: { $exists: true },
+      released: { $gte: released4Gte, $lte: released4Lte },
+    },
+  },
   { $limit: EMBEDDED_AFTER_MATCH },
   { $unwind: "$cast" },
   { $unwind: "$genres" },

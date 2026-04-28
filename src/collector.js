@@ -16,7 +16,7 @@ const DISK_USAGE = "disk_usage";
 const OPLOG_WINDOW = "oplog_window";
 
 const POLL_INTERVAL_STATS = 5 * 60 * 1000;
-const POLL_INTERVAL_LOGS = 10 * 60 * 1000;
+const POLL_INTERVAL_LOGS = 5 * 60 * 1000;
 const POLL_INTERVAL_INDEXES = 10 * 60 * 1000;
 const STORAGE_HOUR = 3; // run storage scan daily at 3 AM local time
 
@@ -55,6 +55,147 @@ function cloneQueryStatsMetrics(metrics) {
   }
 }
 
+/**
+ * Parse a BSON / extended-JSON instant from `$queryStats` (`asOf`, `metrics.latestSeenTimestamp`, …).
+ * @returns {Date|null}
+ */
+function parseMongoInstant(v) {
+  if (v == null) return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) return v;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === "string") {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === "object" && typeof v.toNumber === "function") {
+    const n = v.toNumber();
+    const d = new Date(n);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === "object" && v.$date != null) {
+    const inner = v.$date;
+    if (inner instanceof Date && !Number.isNaN(inner.getTime())) return inner;
+    if (typeof inner === "string" || typeof inner === "number") {
+      const d = new Date(inner);
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    if (inner && typeof inner.$numberLong === "string") {
+      const d = new Date(parseInt(inner.$numberLong, 10));
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+  }
+  return null;
+}
+
+/**
+ * Stored `query_stats.timestamp`: prefer **`metrics.latestSeenTimestamp`**, then **`asOf`**,
+ * then poll time. Pass the same **`metrics`** object you will persist (e.g. after
+ * `cloneQueryStatsMetrics`) so parsing matches what ends up in **`metrics.latestSeenTimestamp`**
+ * in the database — the raw cursor value can differ in BSON shape from the cloned subdocument.
+ */
+function queryStatsRowTimestamp(metrics, entry, fallback) {
+  const latest = parseMongoInstant(metrics?.latestSeenTimestamp);
+  if (latest != null && !Number.isNaN(latest.getTime())) return latest;
+  const asOf = parseMongoInstant(entry?.asOf);
+  if (asOf != null && !Number.isNaN(asOf.getTime())) return asOf;
+  return fallback;
+}
+
+/** Stable id from `$queryStats` for dedupe; may be null on older servers. */
+function queryStatsKeyHash(entry) {
+  const h = entry?.keyHash ?? entry?.key?.keyHash;
+  if (h == null) return null;
+  if (typeof h === "string") return h === "" ? null : h;
+  return String(h);
+}
+
+const QUERY_STATS_UPSERT_CHUNK = 250;
+
+async function bulkUpsertQueryStats(docs) {
+  const coll = getDb().collection(QUERY_STATS);
+  for (let i = 0; i < docs.length; i += QUERY_STATS_UPSERT_CHUNK) {
+    const slice = docs.slice(i, i + QUERY_STATS_UPSERT_CHUNK);
+    const ops = slice.map((doc) => ({
+      updateOne: {
+        filter: {
+          clusterId: doc.clusterId,
+          host: doc.host,
+          timestamp: doc.timestamp,
+          keyHash: doc.keyHash,
+          queryShapeHash: doc.queryShapeHash,
+        },
+        update: { $set: doc },
+        upsert: true,
+      },
+    }));
+    if (ops.length) await coll.bulkWrite(ops, { ordered: false });
+  }
+}
+
+const SLOW_QUERY_UPSERT_CHUNK = 250;
+
+function normalizeSlowQueryCtx(ctx) {
+  if (ctx == null) return "";
+  if (typeof ctx === "string") return ctx;
+  try {
+    return JSON.stringify(ctx);
+  } catch {
+    return String(ctx);
+  }
+}
+
+function slowQueryIdFromLog(log) {
+  const raw = log && log.id;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (raw != null && typeof raw === "object" && typeof raw.toNumber === "function") {
+    try {
+      const n = raw.toNumber();
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function truncatedFromLog(log) {
+  if (!log || typeof log !== "object") return undefined;
+  const a = log.attr;
+  if (Object.prototype.hasOwnProperty.call(log, "truncated")) return Boolean(log.truncated);
+  if (a && typeof a === "object" && Object.prototype.hasOwnProperty.call(a, "truncated")) {
+    return Boolean(a.truncated);
+  }
+  return undefined;
+}
+
+async function bulkUpsertSlowQueries(withNumericId, withoutNumericId) {
+  const coll = getDb().collection(SLOW_QUERIES);
+  for (let i = 0; i < withNumericId.length; i += SLOW_QUERY_UPSERT_CHUNK) {
+    const slice = withNumericId.slice(i, i + SLOW_QUERY_UPSERT_CHUNK);
+    const ops = slice.map((doc) => ({
+      updateOne: {
+        filter: {
+          clusterId: doc.clusterId,
+          host: doc.host,
+          id: doc.id,
+          timestamp: doc.timestamp,
+          millis: doc.millis,
+          ctx: doc.ctx,
+        },
+        update: { $set: doc },
+        upsert: true,
+      },
+    }));
+    if (ops.length) await coll.bulkWrite(ops, { ordered: false });
+  }
+  if (withoutNumericId.length) {
+    await coll.insertMany(withoutNumericId, { ordered: false });
+  }
+}
+
 async function collectQueryStatsForHost(cluster, host) {
   const client = await ensureDirectConnected(cluster, host);
   const cursor = client.db("admin").aggregate([{ $queryStats: {} }], { cursor: {} });
@@ -74,11 +215,13 @@ async function collectQueryStatsForHost(cluster, host) {
       (entry.key?.queryShape?.cmdNs?.coll || "");
     if (isIgnoredNs(ns)) continue;
 
+    const metrics = cloneQueryStatsMetrics(entry.metrics);
     docs.push({
       clusterId: cluster._id,
       clusterName: cluster.name,
       host,
-      timestamp: now,
+      timestamp: queryStatsRowTimestamp(metrics, entry, now),
+      keyHash: queryStatsKeyHash(entry),
       appName: app,
       namespace: ns !== "." ? ns : null,
       queryShapeHash: hashShape(entry.key?.queryShape || {}),
@@ -95,12 +238,12 @@ async function collectQueryStatsForHost(cluster, host) {
         sumOfSquares: entry.metrics?.firstResponseExecMicros?.sumOfSquares || 0,
       },
       lastExecutionMicros: entry.metrics?.lastExecutionMicros || 0,
-      metrics: cloneQueryStatsMetrics(entry.metrics),
+      metrics,
     });
   }
 
   if (!docs.length) return 0;
-  await getDb().collection(QUERY_STATS).insertMany(docs, { ordered: false });
+  await bulkUpsertQueryStats(docs);
   return docs.length;
 }
 
@@ -123,9 +266,12 @@ async function collectQueryStats(cluster) {
       })
       .map((entry) => {
         const ns = (entry.key?.queryShape?.cmdNs?.db || "") + "." + (entry.key?.queryShape?.cmdNs?.coll || "");
+        const metrics = cloneQueryStatsMetrics(entry.metrics);
         return {
           clusterId: cluster._id, clusterName: cluster.name, host: "unknown",
-          timestamp: now, appName: entry.key?.client?.application?.name || null,
+          timestamp: queryStatsRowTimestamp(metrics, entry, now),
+          keyHash: queryStatsKeyHash(entry),
+          appName: entry.key?.client?.application?.name || null,
           namespace: ns !== "." ? ns : null,
           queryShapeHash: hashShape(entry.key?.queryShape || {}),
           queryShape: entry.key?.queryShape || null,
@@ -141,11 +287,11 @@ async function collectQueryStats(cluster) {
             sumOfSquares: entry.metrics?.firstResponseExecMicros?.sumOfSquares || 0,
           },
           lastExecutionMicros: entry.metrics?.lastExecutionMicros || 0,
-          metrics: cloneQueryStatsMetrics(entry.metrics),
+          metrics,
         };
       });
     if (!docs.length) return 0;
-    await getDb().collection(QUERY_STATS).insertMany(docs, { ordered: false });
+    await bulkUpsertQueryStats(docs);
     return docs.length;
   }
 
@@ -282,15 +428,18 @@ async function collectSlowQueries(cluster) {
           parsed.occurredAt instanceof Date && !Number.isNaN(parsed.occurredAt.getTime())
             ? parsed.occurredAt
             : null;
-        allDocs.push({
+        const millis = Number(parsed.millis) || 0;
+        // Prefer log event time (`t` in slow-query JSON); if missing/unparseable, use collect run time.
+        const row = {
           clusterId: cluster._id,
           clusterName: cluster.name,
           host,
           timestamp: occurredAt || now,
+          ctx: parsed.ctx,
+          millis,
           appName: parsed.appName || null,
           comment: parsed.comment || null,
           namespace: ns,
-          millis: parsed.millis || 0,
           planSummary: parsed.planSummary || null,
           cpuNanos: parsed.cpuNanos || null,
           bytesRead: parsed.bytesRead || null,
@@ -298,7 +447,18 @@ async function collectSlowQueries(cluster) {
           docsExamined: parsed.docsExamined || 0,
           keysExamined: parsed.keysExamined || 0,
           nreturned: parsed.nreturned || 0,
-        });
+          // Raw query body for the "Explain" UI (parsed command object + original log line).
+          command: parsed.command || null,
+          originatingCommand: parsed.originatingCommand || null,
+          queryHash: parsed.queryHash || null,
+          planCacheKey: parsed.planCacheKey || null,
+          raw: typeof line === "string" ? line.slice(0, 20000) : null,
+        };
+        if (parsed.id != null && typeof parsed.id === "number" && Number.isFinite(parsed.id)) {
+          row.id = parsed.id;
+        }
+        if (parsed.truncated !== undefined) row.truncated = parsed.truncated;
+        allDocs.push(row);
       }
     } catch (err) {
       console.error(`[slowQueries] ${cluster.name} host=${host}: ${err.message}`);
@@ -307,7 +467,16 @@ async function collectSlowQueries(cluster) {
 
   slowQuerySince.set(clusterId, Date.now());
   if (!allDocs.length) return 0;
-  await getDb().collection(SLOW_QUERIES).insertMany(allDocs, { ordered: false });
+  const withNumericId = [];
+  const withoutNumericId = [];
+  for (const doc of allDocs) {
+    if (doc.id != null && typeof doc.id === "number" && Number.isFinite(doc.id)) {
+      withNumericId.push(doc);
+    } else {
+      withoutNumericId.push(doc);
+    }
+  }
+  await bulkUpsertSlowQueries(withNumericId, withoutNumericId);
   return allDocs.length;
 }
 
@@ -317,8 +486,12 @@ function parseLogLine(line) {
     const a = log.attr || {};
     const cmd = a.command || {};
     const storage = a.storage?.data || {};
-    return {
+    const id = slowQueryIdFromLog(log);
+    const trunc = truncatedFromLog(log);
+    const out = {
       occurredAt: parseLogTimestampFromMongoJson(log),
+      id,
+      ctx: normalizeSlowQueryCtx(log.ctx),
       appName: a.appName || cmd.appName || null,
       comment: cmd.comment || null,
       namespace: a.ns || null,
@@ -330,12 +503,26 @@ function parseLogLine(line) {
       docsExamined: a.docsExamined || 0,
       keysExamined: a.keysExamined || 0,
       nreturned: a.nreturned || 0,
+      // Preserve the slow-op command body so the UI can display the actual query and later run explain().
+      command: a.command || null,
+      originatingCommand: a.originatingCommand || null,
+      queryHash: a.queryHash || null,
+      planCacheKey: a.planCacheKey || null,
     };
+    if (trunc !== undefined) out.truncated = trunc;
+    return out;
   } catch {
     const extract = (pattern) => line.match(pattern)?.[1] || null;
     const extractNum = (pattern) => parseInt(extract(pattern) || "0", 10);
-    return {
+    const idM = line.match(/"id"\s*:\s*(-?\d+)/);
+    const idParsed = idM ? parseInt(idM[1], 10) : null;
+    const id =
+      idParsed != null && !Number.isNaN(idParsed) && Number.isFinite(idParsed) ? idParsed : null;
+    const truncM = line.match(/"truncated"\s*:\s*(true|false)/);
+    const out = {
       occurredAt: extractOccurredAtFromRawLine(line),
+      id,
+      ctx: normalizeSlowQueryCtx(extract(/"ctx"\s*:\s*"([^"]*)"/)),
       appName: extract(/appName:"([^"]+)"/),
       comment: extract(/comment:"([^"]+)"/),
       namespace: extract(/(?:ns|namespace):\s*"?([^\s",]+)/),
@@ -348,6 +535,8 @@ function parseLogLine(line) {
       keysExamined: extractNum(/keysExamined:(\d+)/),
       nreturned: extractNum(/nreturned:(\d+)/),
     };
+    if (truncM) out.truncated = truncM[1] === "true";
+    return out;
   }
 }
 
@@ -369,9 +558,9 @@ async function collectSlowQueriesAll() {
         clusterName: cluster.name,
         targetCollection: SLOW_QUERIES,
         detail: hasAtlas
-          ? `inserted ${count} document(s)`
+          ? `processed ${count} slow-query row(s) (upsert when numeric log id)`
           : "Atlas API keys not configured — no fetch",
-        meta: { insertedCount: count, atlasConfigured: hasAtlas },
+        meta: { processedCount: count, atlasConfigured: hasAtlas },
       });
     } catch (err) {
       console.error(`[slowQueries] ${cluster.name} failed:`, err.message);

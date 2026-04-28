@@ -210,12 +210,35 @@
             <button class="info-btn visible">i</button>
             <div class="info-tooltip info-tooltip-wide">
               <strong>Explanation</strong><br>
-              Creating unnecessary indexes leads to a bloated collection and slow writes. Consider each query your application performs and whether it justifies an index. Remove indexes that are unused, either because the field is not used to query the database or because the index is redundant.<br><br>
-              <strong>Recommended Actions</strong><br>
-              1. Double check all application code to confirm the index pattern is not used in any operations.<br>
-              2. <a href="https://www.mongodb.com/docs/manual/core/index-hidden/" target="_blank" rel="noopener">Hide these unused indexes</a> to test impact without dropping them.<br>
-              3. After one full business cycle, drop the index.
+              Creating unnecessary indexes leads to a bloated collection and slow writes. Consider each query your application performs and whether it justifies an index. Remove indexes that are unused, either because the field is not used to query the database or because the index is redundant.
             </div>
+          </div>
+        </div>
+        <div class="index-recommended-panel">
+          <p class="staging-warning">[Warning] Please test in staging before going to production.</p>
+          <p class="unused-actions-title">Recommended actions</p>
+          <ol class="unused-actions-ol">
+            <li>Double check all application code to confirm the index pattern is not used in any operations.</li>
+            <li>
+              Hide these unused indexes to test impact without dropping them.
+              <a href="https://www.mongodb.com/docs/manual/core/index-hidden/" target="_blank" rel="noopener">Hidden indexes</a>
+              <button type="button" class="btn btn-script-gen" id="btnUnusedHideScripts">Generate hide-index scripts</button>
+            </li>
+            <li>
+              After one full business cycle, drop the index.
+              <button type="button" class="btn btn-script-gen" id="btnUnusedDropScripts">Generate drop-index scripts</button>
+            </li>
+          </ol>
+          <div id="unusedIndexScriptPanel" class="script-gen-panel" hidden>
+            <div class="script-gen-toolbar">
+              <span id="unusedIndexScriptTitle" class="script-gen-title"></span>
+              <div class="script-gen-toolbar-actions">
+                <button type="button" class="btn btn-secondary btn-tiny" id="btnCopyUnusedScript">Copy</button>
+                <button type="button" class="btn-close-script" id="btnCloseUnusedScript" aria-label="Close panel">×</button>
+              </div>
+            </div>
+            <p id="unusedIndexScriptWarning" class="script-gen-warn"></p>
+            <pre id="unusedIndexScriptPre" class="script-gen-pre" spellcheck="false"></pre>
           </div>
         </div>
         <div id="unusedIndexList" class="index-list"></div>
@@ -227,11 +250,16 @@
             <button class="info-btn visible">i</button>
             <div class="info-tooltip info-tooltip-wide">
               <strong>Explanation</strong><br>
-              Creating unnecessary indexes leads to a bloated collection and slow writes. Consider each query your application performs and whether it justifies an index. Remove indexes that are unused, either because the field is not used to query the database or because the index is redundant.<br><br>
-              <strong>Recommended Actions</strong><br>
-              Double check in the application code which index is really used and drop the redundant ones.
+              Creating unnecessary indexes leads to a bloated collection and slow writes. Consider each query your application performs and whether it justifies an index. Remove indexes that are unused, either because the field is not used to query the database or because the index is redundant.
             </div>
           </div>
+        </div>
+        <div class="index-recommended-panel">
+          <p class="staging-warning">[Warning] Please test in staging before going to production.</p>
+          <p class="unused-actions-title">Recommended actions</p>
+          <ol class="unused-actions-ol">
+            <li>Double check in the application code which index is really used and drop the redundant ones.</li>
+          </ol>
         </div>
         <div id="redundantIndexList" class="index-list"></div>
       </section>
@@ -239,7 +267,7 @@
 
     <section class="card" id="storageSection">
       <div class="card-header-row">
-        <h2>Storage & Fragmentation <span class="subtitle">per collection — daily scan — source: collStats</span></h2>
+        <h2>Storage & Fragmentation <span class="subtitle">per collection — daily scan — source: collStats</span> <span id="storageReusableSummary" class="subtitle"></span></h2>
         <div class="info-btn-wrap">
           <button type="button" class="info-btn" aria-label="Fragmentation and storage recommendations">i</button>
           <div class="info-tooltip info-tooltip-storage">
@@ -274,6 +302,127 @@
     </section>
 
   </main>
+
+  <!-- Explain modal: retrieves the query body for a selected bubble/heatmap entry
+       and lets the user pick a cluster to run explain("executionStats") against (execution TBD). -->
+  <div id="explainModal" class="modal-overlay" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="explainModalTitle">
+    <div class="modal-dialog modal-wide">
+      <div class="modal-header">
+        <h3 id="explainModalTitle">Explain — slow query</h3>
+        <button type="button" class="modal-close" id="explainModalClose" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="explain-meta">
+          <div class="explain-meta-row"><span class="em-label">App:</span> <span id="explainAppName" class="em-val">—</span></div>
+          <div class="explain-meta-row"><span class="em-label">Comment:</span> <span id="explainComment" class="em-val">—</span></div>
+          <div class="explain-meta-row"><span class="em-label">Namespace:</span> <span id="explainNamespace" class="em-val">—</span></div>
+          <div class="explain-meta-row"><span class="em-label">Observed at:</span> <span id="explainTimestamp" class="em-val">—</span></div>
+          <div class="explain-meta-row"><span class="em-label">Duration:</span> <span id="explainDuration" class="em-val">—</span></div>
+          <div class="explain-meta-row"><span class="em-label">Plan:</span> <span id="explainPlan" class="em-val">—</span></div>
+        </div>
+
+        <div class="explain-controls-row">
+          <div class="explain-control">
+            <label class="explain-cluster-label" for="explainClusterSelect">Target cluster</label>
+            <select id="explainClusterSelect" class="explain-cluster-select" required>
+              <option value="">Select cluster…</option>
+            </select>
+          </div>
+          <div class="explain-control">
+            <label class="explain-cluster-label" for="explainVerbosity">Verbosity</label>
+            <select id="explainVerbosity" class="explain-cluster-select">
+              <option value="queryPlanner">queryPlanner — plan only, no execution (fast)</option>
+              <option value="executionStats" selected>executionStats — runs the query</option>
+              <option value="allPlansExecution">allPlansExecution — runs all candidate plans (slowest)</option>
+            </select>
+          </div>
+          <div class="explain-control explain-control-narrow">
+            <label class="explain-cluster-label" for="explainTimeoutSec">Timeout (s)</label>
+            <input id="explainTimeoutSec" class="explain-cluster-select" type="number" min="5" max="600" step="5" value="120" />
+          </div>
+        </div>
+        <div id="explainClusterWarn" class="explain-cluster-warn" hidden role="alert">
+          Pick a target cluster before running <code>explain</code>.
+        </div>
+
+        <div class="explain-body-header">
+          <span class="explain-body-title">Query body</span>
+          <div class="explain-body-actions">
+            <button type="button" class="btn btn-secondary btn-tiny" id="explainCopyBtn">Copy</button>
+          </div>
+        </div>
+        <pre id="explainQueryPre" class="explain-query-pre" spellcheck="false">Loading…</pre>
+
+        <p class="explain-hint">
+          The command above is the slow-query body captured by Atlas Performance Advisor.
+          Clicking <code>Run explain("executionStats")</code> connects to the selected cluster
+          (credentials read from <code>mongoadvisor.clusters</code>) and runs the command
+          read-only. EJSON values such as <code>{"$date": "…"}</code> are converted to real
+          <code>ISODate</code> instances before execution.
+        </p>
+
+        <div id="explainResultWrap" class="explain-result-wrap" hidden>
+          <div class="explain-result-header">
+            <span class="explain-body-title">Execution plan</span>
+            <div class="explain-body-actions">
+              <span id="explainResultSummary" class="explain-result-summary"></span>
+            </div>
+          </div>
+
+          <div id="explainStagesEmpty" class="explain-hint" hidden>
+            No per-stage timings are available. This is normal for <code>queryPlanner</code>
+            verbosity or when the operation returns without executing a pipeline.
+          </div>
+
+          <table id="explainStagesTable" class="explain-stages-table" hidden>
+            <thead>
+              <tr>
+                <th class="esc-num">#</th>
+                <th class="esc-label">Stage</th>
+                <th class="esc-ms" title="Time spent in this stage alone (cumulative − earlier stages / children)">Self (ms)</th>
+                <th class="esc-ms" title="Raw executionTimeMillisEstimate from the plan (includes earlier stages / children)">Cumulative (ms)</th>
+                <th class="esc-rows">nReturned</th>
+              </tr>
+            </thead>
+            <tbody id="explainStagesTbody"></tbody>
+          </table>
+
+          <div id="explainStageDetail" class="explain-stage-detail" hidden>
+            <div class="explain-result-header">
+              <span class="explain-body-title">
+                Stage detail — <span id="explainStageDetailLabel">—</span>
+              </span>
+              <div class="explain-body-actions">
+                <button type="button" class="btn btn-secondary btn-tiny" id="explainStageCopyBtn">Copy</button>
+              </div>
+            </div>
+            <pre id="explainStageDetailPre" class="explain-query-pre explain-result-pre" spellcheck="false"></pre>
+          </div>
+
+          <div class="explain-result-header explain-full-header">
+            <button type="button" class="btn btn-secondary btn-tiny" id="explainToggleFullBtn" aria-expanded="false">
+              Show full plan JSON
+            </button>
+            <button type="button" class="btn btn-secondary btn-tiny" id="explainResultCopyBtn">Copy full JSON</button>
+          </div>
+          <pre id="explainResultPre" class="explain-query-pre explain-result-pre" spellcheck="false" hidden></pre>
+        </div>
+
+        <div id="explainProgress" class="explain-progress" hidden>
+          <div class="explain-spinner" aria-hidden="true"></div>
+          <span>Running <code>explain("executionStats")</code> against the selected cluster…</span>
+        </div>
+
+        <div id="explainError" class="explain-error" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="explainCloseFooterBtn">Close</button>
+        <button type="button" class="btn" id="explainRunBtn" disabled>
+          Run explain("executionStats")
+        </button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

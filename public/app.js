@@ -19,10 +19,21 @@ let slowestAppChart = null;
 let bubbleChart = null;
 let treemapIOChart = null;
 let treemapCPUChart = null;
+/** Latest rows from `/api/metrics/unused-indexes` for script generation (deduped by namespace + index name). */
+let cachedUnusedIndexes = null;
 
 function shortName(name, max) {
   if (!name) return "(no appName)";
   return name.length > max ? name.slice(0, max - 2) + "…" : name;
+}
+
+function escHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function formatNum(n) {
@@ -131,7 +142,7 @@ function renderTopology(clusterId) {
 // ─── Filters ────────────────────────────────────────────────────────
 
 // Keep in sync with src/hidden-dbs.js (HIDDEN_TOP_LEVEL_DBS)
-const HIDDEN_DBS = ["admin", "config", "local", "mongoadvisor", "mongomonitor", "#mongodb-mcp"];
+const HIDDEN_DBS = ["admin", "config", "local", "mongoadvisor", "#mongodb-mcp"];
 let allNamespaces = [];
 let visibleNamespaces = [];
 let allHosts = [];
@@ -367,6 +378,8 @@ async function loadBubbleChart() {
         label,
         appName: app,
         comment,
+        rawAppName: d.appName || "",
+        rawComment: d.comment || "",
         count: d.count,
         avgMillis: d.avgMillis,
         maxMillis: d.maxMillis,
@@ -412,40 +425,8 @@ async function loadBubbleChart() {
         plugins: {
           legend: { display: false },
           tooltip: {
-            maxWidth: 500,
-            bodyFont: { size: 11 },
-            titleFont: { size: 12 },
-            callbacks: {
-              title(items) {
-                const p = items[0]?.raw;
-                if (!p) return "";
-                const lines = [`App: ${p.appName}`];
-                const comment = p.comment || "(no comment)";
-                for (let i = 0; i < comment.length; i += 70) {
-                  const prefix = i === 0 ? "Comment: " : "  ";
-                  lines.push(prefix + comment.slice(i, i + 70));
-                }
-                return lines;
-              },
-              label(ctx) {
-                const p = ctx.raw;
-                const wrap = (prefix, s, w) => {
-                  if (!s || s.length <= w) return [`${prefix}${s || "—"}`];
-                  const lines = [];
-                  for (let i = 0; i < s.length; i += w) {
-                    lines.push((i === 0 ? prefix : "  ") + s.slice(i, i + w));
-                  }
-                  return lines;
-                };
-                return [
-                  `Count: ${p.count}  |  Avg: ${p.avgMillis}ms  |  Max: ${p.maxMillis}ms`,
-                  `Total: ${formatNum(p.totalMillis)}ms  |  CPU: ${p.totalCpuMs}ms`,
-                  `IO: ${p.totalBytesReadMB} MB  |  Docs: ${formatNum(p.docsExamined)}  |  Keys: ${formatNum(p.keysExamined)}`,
-                  ...wrap("NS: ", p.ns, 60),
-                  ...wrap("Plan: ", p.plans, 55),
-                ];
-              },
-            },
+            enabled: false,
+            external: (context) => renderBubbleTooltip(context),
           },
         },
       },
@@ -454,6 +435,86 @@ async function loadBubbleChart() {
     console.error("bubble chart error:", err);
   }
 }
+
+/** Interactive HTML tooltip for the bubble chart — lets us host an Explain button
+ *  (Chart.js default tooltips are not clickable). Mirrors the heatmap pattern. */
+function renderBubbleTooltip(context) {
+  const { chart, tooltip } = context;
+  let el = chart.canvas.parentNode.querySelector(".treemap-tooltip");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "treemap-tooltip";
+    chart.canvas.parentNode.style.position = "relative";
+    chart.canvas.parentNode.appendChild(el);
+    el._hovered = false;
+    el.addEventListener("mouseenter", () => { el._hovered = true; });
+    el.addEventListener("mouseleave", () => {
+      el._hovered = false;
+      el.style.opacity = "0";
+      el.style.pointerEvents = "none";
+    });
+  }
+  if (tooltip.opacity === 0) {
+    if (el._hovered) return;
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => {
+      if (!el._hovered) { el.style.opacity = "0"; el.style.pointerEvents = "none"; }
+    }, 300);
+    return;
+  }
+  clearTimeout(el._hideTimer);
+  const p = tooltip.dataPoints?.[0]?.raw;
+  if (!p) { el.style.opacity = "0"; return; }
+
+  const comment = p.comment || "(no comment)";
+  let html = `<div class="tt-title">App: ${escHtml(p.appName || "—")}</div>`;
+  html += `<div class="tt-entry">`;
+  html += `<div class="tt-comment">${escHtml(comment)}</div>`;
+  html += `<div class="tt-metric">Count: ${p.count}  |  Avg: ${p.avgMillis}ms  |  Max: ${p.maxMillis}ms</div>`;
+  html += `<div class="tt-metric">Total: ${escHtml(formatNum(p.totalMillis))}ms  |  CPU: ${p.totalCpuMs}ms</div>`;
+  html += `<div class="tt-metric">IO: ${p.totalBytesReadMB} MB  |  Docs: ${escHtml(formatNum(p.docsExamined))}  |  Keys: ${escHtml(formatNum(p.keysExamined))}</div>`;
+  html += `<div class="tt-metric">NS: ${escHtml(p.ns)}</div>`;
+  html += `<div class="tt-metric">Plan: ${escHtml(p.plans)}</div>`;
+  html += `<div class="tt-explain-row">${explainButtonHtml({
+    appName: p.rawAppName ?? "",
+    comment: p.rawComment ?? "",
+    namespace: pickFirstNs(p.ns),
+  })}</div>`;
+  html += `</div>`;
+  el.innerHTML = html;
+  el.style.opacity = "1";
+  el.style.pointerEvents = "auto";
+  const pos = tooltip.caretX;
+  const mid = chart.width / 2;
+  el.style.left = pos < mid ? (tooltip.caretX + 10) + "px" : "";
+  el.style.right = pos >= mid ? (chart.width - tooltip.caretX + 10) + "px" : "";
+  el.style.top = Math.max(0, tooltip.caretY - 40) + "px";
+}
+
+function pickFirstNs(nsStr) {
+  if (!nsStr || nsStr === "—") return "";
+  const first = String(nsStr).split(",")[0].trim();
+  return first || "";
+}
+
+function explainButtonHtml({ appName, comment, namespace }) {
+  const a = escHtml(appName || "");
+  const c = escHtml(comment || "");
+  const n = escHtml(namespace || "");
+  return `<button type="button" class="btn-tt-explain js-open-explain" data-explain-app="${a}" data-explain-comment="${c}" data-explain-ns="${n}">Explain("executionStats")</button>`;
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".js-open-explain");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openExplainModal({
+    appName: btn.getAttribute("data-explain-app") || "",
+    comment: btn.getAttribute("data-explain-comment") || "",
+    namespace: btn.getAttribute("data-explain-ns") || "",
+  });
+});
 
 // ─── Dual Treemaps: IO heatmap + CPU heatmap ────────────────────────
 
@@ -480,7 +541,7 @@ function buildTreemapConfig(treeData, metricKey, colorStops, tooltipFn) {
       datasets: [{
         tree: treeData,
         key: "value",
-        groups: ["appName"],
+        groups: ["appName", "queryLabel"],
         borderWidth: 2,
         borderColor: "#0f1923",
         spacing: 1,
@@ -554,16 +615,28 @@ function buildTreemapConfig(treeData, metricKey, colorStops, tooltipFn) {
               return;
             }
             clearTimeout(el._hideTimer);
-            const d = tooltip.dataPoints?.[0]?.raw?._data;
+            const dps = tooltip.dataPoints || [];
+            const deepest = dps.reduce((best, cur) => {
+              const bl = best?.raw?.l ?? -1;
+              const cl = cur?.raw?.l ?? -1;
+              return cl > bl ? cur : best;
+            }, null);
+            const d = deepest?.raw?._data;
             if (!d) { el.style.opacity = "0"; return; }
-            const kids = d.children || [d];
-            let html = `<div class="tt-title">App: ${d.appName || "—"}</div>`;
+            const isLeaf = !Array.isArray(d.children);
+            const kids = isLeaf ? [d] : d.children;
+            let html = `<div class="tt-title">App: ${escHtml(d.appName || kids[0]?.appName || "—")}</div>`;
             for (const kid of kids) {
               const comment = kid.fullComment || "(no comment)";
               const metrics = tooltipFn(kid);
               html += `<div class="tt-entry">`;
-              html += `<div class="tt-comment">${comment}</div>`;
-              html += metrics.map((l) => `<div class="tt-metric">${l}</div>`).join("");
+              html += `<div class="tt-comment">${escHtml(comment)}</div>`;
+              html += metrics.map((l) => `<div class="tt-metric">${escHtml(l)}</div>`).join("");
+              html += `<div class="tt-explain-row">${explainButtonHtml({
+                appName: kid.rawAppName ?? (kid.appName === "(no appName)" ? "" : (kid.appName || "")),
+                comment: kid.rawComment ?? (kid.fullComment === "(no comment)" ? "" : (kid.fullComment || "")),
+                namespace: pickFirstNs(kid.ns || ""),
+              })}</div>`;
               html += `</div>`;
             }
             el.innerHTML = html;
@@ -629,6 +702,8 @@ async function loadImpactChart() {
       const ns = (d.namespaces || []).filter(Boolean).join(", ") || "—";
       return {
         appName: app,
+        rawAppName: d.appName || "",
+        rawComment: d.comment || "",
         tileLabel: `${app} — ${shortComment}`,
         queryLabel: shortComment,
         fullComment: comment,
@@ -670,11 +745,86 @@ async function loadIndexAnalysis() {
   await Promise.all([loadUnusedIndexes(), loadRedundantIndexes()]);
 }
 
+function splitNsForShell(ns) {
+  if (!ns || typeof ns !== "string") return { db: "", coll: "" };
+  const i = ns.indexOf(".");
+  if (i <= 0) return { db: ns, coll: "" };
+  return { db: ns.slice(0, i), coll: ns.slice(i + 1) };
+}
+
+function dedupeUnusedByNsName(rows) {
+  const seen = new Map();
+  for (const row of rows) {
+    const k = `${row.namespace}\n${row.indexName}`;
+    if (!seen.has(k)) seen.set(k, row);
+  }
+  return [...seen.values()];
+}
+
+function buildUnusedIndexShellScripts(kind, rows) {
+  const header =
+    "// [Warning] STAGING FIRST — review application queries, then test workload before production.\n" +
+    "// Generated by MongoAdvisor — not executed here. Run in mongosh against the correct cluster.\n\n";
+  const sample =
+    header +
+    (kind === "hide"
+      ? "// Sample (replace database, collection, and index name):\n" +
+        '// db.getSiblingDB("<database>").getCollection("<collection>").hideIndex("<indexName>");\n' +
+        "// Unhide later: db.getSiblingDB(\"<database>\").getCollection(\"<collection>\").unhideIndex(\"<indexName>\");\n"
+      : "// Sample (replace database, collection, and index name):\n" +
+        '// db.getSiblingDB("<database>").getCollection("<collection>").dropIndex("<indexName>");\n');
+
+  if (!rows || !rows.length) return sample;
+
+  const unique = dedupeUnusedByNsName(rows);
+  const lines = [header];
+  for (const idx of unique) {
+    const { db, coll } = splitNsForShell(idx.namespace);
+    if (!db || !coll) continue;
+    const inm = JSON.stringify(idx.indexName);
+    if (kind === "hide") {
+      lines.push(
+        `// ${idx.namespace} — ${idx.indexName}\n` +
+          `db.getSiblingDB(${JSON.stringify(db)}).getCollection(${JSON.stringify(coll)}).hideIndex(${inm});\n`,
+      );
+    } else {
+      lines.push(
+        `// ${idx.namespace} — ${idx.indexName}\n` +
+          `db.getSiblingDB(${JSON.stringify(db)}).getCollection(${JSON.stringify(coll)}).dropIndex(${inm});\n`,
+      );
+    }
+  }
+  if (lines.length <= 1) return sample;
+  return lines.join("\n");
+}
+
+function showUnusedIndexScriptPanel(kind) {
+  const panel = document.getElementById("unusedIndexScriptPanel");
+  const title = document.getElementById("unusedIndexScriptTitle");
+  const warn = document.getElementById("unusedIndexScriptWarning");
+  const pre = document.getElementById("unusedIndexScriptPre");
+  const isHide = kind === "hide";
+  title.textContent = isHide ? "mongosh — hide indexes" : "mongosh — drop indexes";
+  warn.textContent =
+    "[Warning] Run only in a non-production environment first. " +
+    (isHide
+      ? "Hidden indexes stay on disk but are ignored by the planner — verify behavior under real traffic."
+      : "Dropping an index cannot be undone from this UI — ensure one full business cycle after hiding, if you used that workflow.");
+  pre.textContent = buildUnusedIndexShellScripts(isHide ? "hide" : "drop", cachedUnusedIndexes || []);
+  panel.hidden = false;
+}
+
+function hideUnusedIndexScriptPanel() {
+  const panel = document.getElementById("unusedIndexScriptPanel");
+  if (panel) panel.hidden = true;
+}
+
 async function loadUnusedIndexes() {
   const container = document.getElementById("unusedIndexList");
   try {
     const res = await fetch(`${API}/api/metrics/unused-indexes${indexListParams()}`);
     const data = await res.json();
+    cachedUnusedIndexes = Array.isArray(data) ? data : [];
     if (!data.length) {
       container.innerHTML = '<div class="index-empty">No unused indexes detected</div>';
       return;
@@ -694,9 +844,29 @@ async function loadUnusedIndexes() {
       </div>
     `).join("");
   } catch {
+    cachedUnusedIndexes = null;
     container.innerHTML = '<div class="index-empty">Failed to load</div>';
   }
 }
+
+document.getElementById("btnUnusedHideScripts")?.addEventListener("click", () => {
+  showUnusedIndexScriptPanel("hide");
+});
+document.getElementById("btnUnusedDropScripts")?.addEventListener("click", () => {
+  showUnusedIndexScriptPanel("drop");
+});
+document.getElementById("btnCloseUnusedScript")?.addEventListener("click", () => {
+  hideUnusedIndexScriptPanel();
+});
+document.getElementById("btnCopyUnusedScript")?.addEventListener("click", async () => {
+  const pre = document.getElementById("unusedIndexScriptPre");
+  const text = pre ? pre.textContent : "";
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    /* ignore */
+  }
+});
 
 async function loadRedundantIndexes() {
   const container = document.getElementById("redundantIndexList");
@@ -762,6 +932,15 @@ function renderStorageTable() {
   const emptyMsg = document.getElementById("storageEmpty");
   const table = document.getElementById("storageTable");
   const pager = document.getElementById("storagePager");
+  const summary = document.getElementById("storageReusableSummary");
+
+  if (summary) {
+    const totalReusable = storageData.reduce((s, d) => s + (d.collReusableBytes || 0), 0);
+    const totalGb = totalReusable / 1_073_741_824;
+    summary.textContent = storageData.length
+      ? `· total reusable: ${totalGb.toFixed(2)} GB`
+      : "";
+  }
 
   if (!storageData.length) {
     tbody.innerHTML = "";
@@ -1195,6 +1374,507 @@ async function loadOplogWindow() {
       '<span class="empty">Failed to load oplog data: network error or request was blocked. Check that the MongoAdvisor server is reachable.</span>';
   }
 }
+
+// ─── Explain Modal ──────────────────────────────────────────────────
+
+let explainCurrent = null;
+/** Parsed command body from `/api/metrics/slow-query-sample`, used by the Run button. */
+let explainCommandBody = null;
+/** Namespace resolved from the slow-query sample (falls back to the tile's namespace). */
+let explainNamespaceResolved = null;
+
+function setExplainRunEnabled() {
+  const btn = document.getElementById("explainRunBtn");
+  const sel = document.getElementById("explainClusterSelect");
+  const warn = document.getElementById("explainClusterWarn");
+  if (!btn || !sel) return;
+  const hasCluster = !!sel.value;
+  const hasCommand = !!explainCommandBody && typeof explainCommandBody === "object";
+  const hasNs = !!(explainNamespaceResolved && explainNamespaceResolved.includes("."));
+  btn.disabled = !(hasCluster && hasCommand && hasNs);
+  if (btn.disabled) {
+    if (!hasCommand) btn.title = "Waiting for the query body to load";
+    else if (!hasNs) btn.title = "Query namespace could not be determined";
+    else if (!hasCluster) btn.title = "Pick a target cluster first";
+  } else {
+    btn.title = "";
+  }
+  // Show the "pick a cluster" warning only once the query body is ready — otherwise
+  // we'd flash it during the brief loading window even though the user has nothing
+  // actionable to do yet.
+  if (warn) {
+    const shouldWarn = hasCommand && hasNs && !hasCluster;
+    warn.hidden = !shouldWarn;
+    sel.classList.toggle("is-invalid", shouldWarn);
+  }
+}
+
+function populateExplainClusterSelect() {
+  const sel = document.getElementById("explainClusterSelect");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">Select cluster…</option>';
+  for (const c of clusters) {
+    const opt = document.createElement("option");
+    opt.value = c._id;
+    opt.textContent = clusterDisplayName(clusters, c);
+    sel.appendChild(opt);
+  }
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+function openExplainModal(ctx) {
+  const modal = document.getElementById("explainModal");
+  if (!modal) return;
+  explainCurrent = {
+    appName: ctx?.appName || "",
+    comment: ctx?.comment || "",
+    namespace: ctx?.namespace || "",
+  };
+  explainCommandBody = null;
+  explainNamespaceResolved = ctx?.namespace || null;
+
+  document.getElementById("explainAppName").textContent = explainCurrent.appName || "(no appName)";
+  document.getElementById("explainComment").textContent = explainCurrent.comment || "(no comment)";
+  document.getElementById("explainNamespace").textContent = explainCurrent.namespace || "—";
+  document.getElementById("explainTimestamp").textContent = "—";
+  document.getElementById("explainDuration").textContent = "—";
+  document.getElementById("explainPlan").textContent = "—";
+  document.getElementById("explainQueryPre").textContent = "Loading…";
+
+  // Reset result panel each time the modal opens.
+  document.getElementById("explainResultWrap").hidden = true;
+  document.getElementById("explainResultPre").textContent = "";
+  document.getElementById("explainResultSummary").innerHTML = "";
+  document.getElementById("explainProgress").hidden = true;
+  document.getElementById("explainError").hidden = true;
+  document.getElementById("explainError").textContent = "";
+  const warn = document.getElementById("explainClusterWarn");
+  if (warn) warn.hidden = true;
+  const selReset = document.getElementById("explainClusterSelect");
+  if (selReset) selReset.classList.remove("is-invalid");
+
+  populateExplainClusterSelect();
+  setExplainRunEnabled();
+
+  modal.hidden = false;
+  modal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+
+  loadExplainQueryBody();
+}
+
+function closeExplainModal() {
+  const modal = document.getElementById("explainModal");
+  if (!modal) return;
+  modal.hidden = true;
+  modal.setAttribute("aria-hidden", "true");
+  document.body.style.overflow = "";
+  explainCurrent = null;
+}
+
+async function loadExplainQueryBody() {
+  const pre = document.getElementById("explainQueryPre");
+  if (!pre || !explainCurrent) return;
+
+  const params = new URLSearchParams();
+  // Reuse the dashboard's current time window so we find a sample from roughly the same period.
+  const range = getTimeRange();
+  if (range) {
+    const since = new Date(Date.now() - parseInt(range)).toISOString();
+    params.set("since", since);
+  }
+  if (explainCurrent.appName !== undefined) params.set("appName", explainCurrent.appName);
+  if (explainCurrent.comment !== undefined) params.set("comment", explainCurrent.comment);
+  if (explainCurrent.namespace) params.set("namespace", explainCurrent.namespace);
+  for (const h of getSelectedHosts()) params.append("host", h);
+
+  try {
+    const res = await fetch(`${API}/api/metrics/slow-query-sample?${params}`);
+    if (res.status === 404) {
+      pre.textContent = "No matching slow-query log found in the current time range.\nTry widening the time range (All) or relaxing the host filter.";
+      return;
+    }
+    if (!res.ok) {
+      pre.textContent = `Failed to load query body (HTTP ${res.status}).`;
+      return;
+    }
+    const doc = await res.json();
+
+    if (doc.timestamp) {
+      try { document.getElementById("explainTimestamp").textContent = new Date(doc.timestamp).toLocaleString(); }
+      catch { /* ignore */ }
+    }
+    if (doc.millis != null) document.getElementById("explainDuration").textContent = `${doc.millis} ms`;
+    if (doc.planSummary) document.getElementById("explainPlan").textContent = doc.planSummary;
+    if (doc.namespace) {
+      document.getElementById("explainNamespace").textContent = doc.namespace;
+      explainNamespaceResolved = doc.namespace;
+    }
+
+    let body = null;
+    if (doc.command && typeof doc.command === "object") body = doc.command;
+    else if (doc.originatingCommand && typeof doc.originatingCommand === "object") body = doc.originatingCommand;
+    else if (typeof doc.raw === "string" && doc.raw.length) {
+      try {
+        const parsed = JSON.parse(doc.raw);
+        body = parsed.attr?.command || null;
+      } catch { /* ignore */ }
+    }
+
+    if (body) {
+      explainCommandBody = body;
+      pre.textContent = JSON.stringify(body, null, 2);
+    } else {
+      explainCommandBody = null;
+      pre.textContent = typeof doc.raw === "string" && doc.raw.length
+        ? doc.raw
+        : "(No command body captured on this slow-query log line.)";
+    }
+    setExplainRunEnabled();
+  } catch (err) {
+    pre.textContent = `Network error: ${err.message || err}`;
+    explainCommandBody = null;
+    setExplainRunEnabled();
+  }
+}
+
+async function runExplainOnSelectedCluster() {
+  const sel = document.getElementById("explainClusterSelect");
+  const runBtn = document.getElementById("explainRunBtn");
+  const progress = document.getElementById("explainProgress");
+  const errBox = document.getElementById("explainError");
+  const resultWrap = document.getElementById("explainResultWrap");
+  const resultPre = document.getElementById("explainResultPre");
+  const resultSummary = document.getElementById("explainResultSummary");
+
+  const clusterId = sel?.value;
+  if (!clusterId || !explainCommandBody || !explainNamespaceResolved) return;
+
+  const verbosity = document.getElementById("explainVerbosity")?.value || "executionStats";
+  const timeoutRaw = Number(document.getElementById("explainTimeoutSec")?.value || 120);
+  const timeoutSec = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.min(Math.max(timeoutRaw, 5), 600) : 120;
+
+  errBox.hidden = true;
+  errBox.textContent = "";
+  resultWrap.hidden = true;
+  resultPre.textContent = "";
+  resultPre.hidden = true;
+  resultSummary.innerHTML = "";
+  // Reset the top-5 stage table + stage-detail + full-plan toggle so stale content doesn't flash.
+  const stagesTbody = document.getElementById("explainStagesTbody");
+  const stagesTable = document.getElementById("explainStagesTable");
+  const stagesEmpty = document.getElementById("explainStagesEmpty");
+  const stageDetail = document.getElementById("explainStageDetail");
+  const toggleFullBtn = document.getElementById("explainToggleFullBtn");
+  if (stagesTbody) stagesTbody.innerHTML = "";
+  if (stagesTable) stagesTable.hidden = true;
+  if (stagesEmpty) stagesEmpty.hidden = true;
+  if (stageDetail) stageDetail.hidden = true;
+  if (toggleFullBtn) {
+    toggleFullBtn.textContent = "Show full plan JSON";
+    toggleFullBtn.setAttribute("aria-expanded", "false");
+  }
+  // Update the progress banner with the actually-running verbosity for clarity.
+  const progressLabel = progress.querySelector("span");
+  if (progressLabel) {
+    progressLabel.innerHTML = `Running <code>explain("${escHtml(verbosity)}")</code> against the selected cluster (timeout ${timeoutSec}s)…`;
+  }
+  progress.hidden = false;
+  runBtn.disabled = true;
+
+  const started = Date.now();
+  try {
+    const res = await fetch(`${API}/api/clusters/${clusterId}/explain`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        namespace: explainNamespaceResolved,
+        command: explainCommandBody,
+        verbosity,
+        timeoutMs: timeoutSec * 1000,
+      }),
+    });
+
+    let data = null;
+    try { data = await res.json(); } catch { /* non-JSON */ }
+
+    if (!res.ok) {
+      const msg = (data && (data.error || data.message)) || `HTTP ${res.status}`;
+      // If we timed out on an execution-mode explain, point the user at the zero-cost
+      // alternative so they can still see the plan shape without waiting or grinding the cluster.
+      const isTimeout = /time limit|MaxTimeMS|timed out/i.test(msg);
+      let hint = "";
+      if (isTimeout && verbosity !== "queryPlanner") {
+        hint =
+          "\n\nThe server ran the query for the full timeout before giving up. " +
+          "Switch Verbosity to queryPlanner to see the plan without executing, " +
+          "or raise Timeout and try again.";
+      }
+      errBox.textContent = `Explain failed: ${msg}${hint}`;
+      errBox.hidden = false;
+      return;
+    }
+
+    const result = data?.result || {};
+    resultPre.textContent = JSON.stringify(result, null, 2);
+    resultSummary.innerHTML = formatExplainSummary(result, data.elapsedMs ?? (Date.now() - started));
+    renderExplainStages(result);
+    resultWrap.hidden = false;
+    // Pull the result into view.
+    resultWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (err) {
+    errBox.textContent = `Network error: ${err.message || err}`;
+    errBox.hidden = false;
+  } finally {
+    progress.hidden = true;
+    setExplainRunEnabled();
+  }
+}
+
+/** Pull the interesting numbers out of an explain result (any verbosity). */
+function formatExplainSummary(result, elapsedMs) {
+  const stats = result?.executionStats;
+  // Aggregation explains wrap queryPlanner under stages[0].$cursor.queryPlanner —
+  // fall back to that shape so the summary isn't blank for pipelines.
+  const qp =
+    result?.queryPlanner ||
+    result?.stages?.[0]?.$cursor?.queryPlanner ||
+    {};
+  const winning = qp.winningPlan || {};
+
+  // Walk inputStage chain to surface the inner-most stage name (past SINGLE_SHARD, PROJECTION, etc.).
+  let stage = winning.stage || "—";
+  let cur = winning;
+  while (cur?.inputStage) {
+    cur = cur.inputStage;
+    if (cur.stage) stage = cur.stage;
+  }
+
+  // Classify: COLLSCAN is bad; IXSCAN with docs≈keys is efficient; docs>>keys is inefficient.
+  let cls = "ok";
+  if (String(stage).toUpperCase().includes("COLLSCAN")) cls = "bad";
+
+  if (!stats) {
+    // queryPlanner verbosity: no execution numbers available.
+    return `<span class="${cls}">${escHtml(String(stage))}</span> · plan only (wall ${elapsedMs} ms)`;
+  }
+
+  const nReturned = stats.nReturned ?? "—";
+  const docs = stats.totalDocsExamined ?? "—";
+  const keys = stats.totalKeysExamined ?? "—";
+  const ms = stats.executionTimeMillis ?? "—";
+  if (cls === "ok" && Number(docs) > 0 && Number(keys) > 0 && Number(docs) / Number(keys) > 10) cls = "warn";
+
+  return `<span class="${cls}">${escHtml(String(stage))}</span> · nReturned=${nReturned} · docs=${docs} · keys=${keys} · ${ms} ms (wall ${elapsedMs} ms)`;
+}
+
+// ─── Explain: per-stage table ──────────────────────────────────────────
+//
+// The full explain document is huge (pipelines nest queryPlanner → executionStages → inputStage
+// recursively, and every sub-document has its own counters). Users almost always want to start
+// with "which stages are slow?" — so we collect every node that carries an
+// `executionTimeMillisEstimate`, show the top-5 in a table, and expose the raw JSON on demand.
+
+/**
+ * `executionTimeMillisEstimate` is *cumulative* in MongoDB's explain output:
+ *   - in an aggregation pipeline, stage[i] includes the time of every earlier stage
+ *     (plus stage[0] which is usually `$cursor` and itself wraps the whole find-stage tree),
+ *   - inside a find-stage tree, each parent includes the time of its children.
+ *
+ * To get the time actually spent *in* that stage we subtract the time already accounted for
+ * below/before it. We keep the raw cumulative value on the row too so the user can still
+ * cross-reference with the raw JSON ("cumulative" column / detail view).
+ *
+ * Each collected stage is `{ n, label, ms, cumulativeMs, nReturned, detail }`.
+ */
+function collectExplainStages(result) {
+  const out = [];
+  let counter = 0;
+
+  const pipelineStages = Array.isArray(result?.stages) ? result.stages : null;
+
+  if (pipelineStages) {
+    // Track the largest cumulative value seen so far: the next pipeline stage can never have
+    // run faster than the previous, so we compute self = current - prevCumulative.
+    // (Note: stage[0] is typically `$cursor`, whose cumulative time already covers the whole
+    // find-stage tree — which is why the tree rows below correctly subtract their own children.)
+    let prevCumulative = 0;
+
+    for (const stage of pipelineStages) {
+      if (!stage || typeof stage !== "object") continue;
+      const opKey = Object.keys(stage).find((k) => k.startsWith("$")) || "(stage)";
+      const cumulative = stage.executionTimeMillisEstimate;
+
+      if (cumulative != null) {
+        const selfMs = Math.max(0, Number(cumulative) - prevCumulative);
+        out.push({
+          n: ++counter,
+          label: opKey,
+          ms: selfMs,
+          cumulativeMs: Number(cumulative) || 0,
+          nReturned: stage.nReturned,
+          detail: stage,
+        });
+        prevCumulative = Number(cumulative) || prevCumulative;
+      }
+
+      // Dive into $cursor to also surface the find-stage tree with per-node self times.
+      if (opKey === "$cursor" && stage.$cursor?.executionStats?.executionStages) {
+        walkExecTree(stage.$cursor.executionStats.executionStages, out, () => ++counter, "$cursor ▸ ");
+      }
+    }
+  }
+
+  // Plain find/count/distinct: the tree lives directly under executionStats.executionStages.
+  if (!pipelineStages && result?.executionStats?.executionStages) {
+    walkExecTree(result.executionStats.executionStages, out, () => ++counter, "");
+  }
+
+  return out;
+}
+
+/**
+ * Recursively walk `executionStages`. Each node's `executionTimeMillisEstimate` includes its
+ * children, so the "self" time for this stage is `node.ms - sum(direct children ms)`.
+ */
+function walkExecTree(node, out, nextN, prefix) {
+  if (!node || typeof node !== "object") return;
+  const cumulative = node.executionTimeMillisEstimate;
+  const stageName = node.stage || "(stage)";
+
+  const children = [];
+  if (node.inputStage) children.push(node.inputStage);
+  if (Array.isArray(node.inputStages)) children.push(...node.inputStages);
+
+  const childrenCumulativeSum = children.reduce((acc, c) => {
+    const v = c && typeof c === "object" ? Number(c.executionTimeMillisEstimate) : 0;
+    return acc + (Number.isFinite(v) ? v : 0);
+  }, 0);
+
+  if (cumulative != null) {
+    const selfMs = Math.max(0, Number(cumulative) - childrenCumulativeSum);
+    out.push({
+      n: nextN(),
+      label: `${prefix}${stageName}`,
+      ms: selfMs,
+      cumulativeMs: Number(cumulative) || 0,
+      nReturned: node.nReturned,
+      detail: node,
+    });
+  }
+
+  for (const c of children) walkExecTree(c, out, nextN, prefix);
+}
+
+let explainStagesCache = [];
+let explainSelectedStageIdx = -1;
+
+function renderExplainStages(result) {
+  const tbody = document.getElementById("explainStagesTbody");
+  const table = document.getElementById("explainStagesTable");
+  const empty = document.getElementById("explainStagesEmpty");
+  const detailWrap = document.getElementById("explainStageDetail");
+  if (!tbody || !table || !empty || !detailWrap) return;
+
+  tbody.innerHTML = "";
+  detailWrap.hidden = true;
+  explainStagesCache = collectExplainStages(result);
+  explainSelectedStageIdx = -1;
+
+  if (explainStagesCache.length === 0) {
+    table.hidden = true;
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+
+  // Sort by self-time desc (the true per-stage cost), keep the top 5. Preserve original
+  // stage numbers so the user can map back to the raw pipeline position.
+  const top = [...explainStagesCache].sort((a, b) => b.ms - a.ms).slice(0, 5);
+  const maxMs = top[0].ms || 1;
+
+  for (const s of top) {
+    const tr = document.createElement("tr");
+    tr.dataset.stageN = String(s.n);
+    const barPct = Math.max(2, Math.round((s.ms / maxMs) * 100));
+    const barCls = s.ms >= maxMs * 0.8 ? "bad" : s.ms >= maxMs * 0.4 ? "warn" : "";
+    tr.innerHTML = `
+      <td class="esc-num">#${s.n}</td>
+      <td class="esc-label">${escHtml(s.label)}</td>
+      <td class="esc-ms">
+        <span class="ms-bar ${barCls}" style="width:${barPct}px"></span>${s.ms} ms
+      </td>
+      <td class="esc-ms">${s.cumulativeMs} ms</td>
+      <td class="esc-rows">${s.nReturned ?? "—"}</td>
+    `;
+    tr.addEventListener("click", () => selectExplainStage(s.n));
+    tbody.appendChild(tr);
+  }
+  table.hidden = false;
+
+  // Auto-select the slowest one so the user sees a detail payload immediately.
+  selectExplainStage(top[0].n);
+}
+
+function selectExplainStage(n) {
+  const stage = explainStagesCache.find((s) => s.n === n);
+  if (!stage) return;
+  explainSelectedStageIdx = n;
+
+  const tbody = document.getElementById("explainStagesTbody");
+  if (tbody) {
+    for (const tr of tbody.querySelectorAll("tr")) {
+      tr.classList.toggle("is-selected", tr.dataset.stageN === String(n));
+    }
+  }
+
+  const label = document.getElementById("explainStageDetailLabel");
+  const pre = document.getElementById("explainStageDetailPre");
+  const wrap = document.getElementById("explainStageDetail");
+  if (label) label.textContent = `#${stage.n} ${stage.label} — self ${stage.ms} ms / cumulative ${stage.cumulativeMs} ms`;
+  if (pre) pre.textContent = JSON.stringify(stage.detail, null, 2);
+  if (wrap) wrap.hidden = false;
+}
+
+document.getElementById("explainModalClose")?.addEventListener("click", closeExplainModal);
+document.getElementById("explainCloseFooterBtn")?.addEventListener("click", closeExplainModal);
+document.getElementById("explainModal")?.addEventListener("click", (e) => {
+  // Click on the overlay (not the dialog) closes the modal.
+  if (e.target.id === "explainModal") closeExplainModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    const modal = document.getElementById("explainModal");
+    if (modal && !modal.hidden) closeExplainModal();
+  }
+});
+document.getElementById("explainCopyBtn")?.addEventListener("click", async () => {
+  const pre = document.getElementById("explainQueryPre");
+  if (!pre) return;
+  try { await navigator.clipboard.writeText(pre.textContent || ""); } catch { /* ignore */ }
+});
+document.getElementById("explainResultCopyBtn")?.addEventListener("click", async () => {
+  const pre = document.getElementById("explainResultPre");
+  if (!pre) return;
+  try { await navigator.clipboard.writeText(pre.textContent || ""); } catch { /* ignore */ }
+});
+document.getElementById("explainStageCopyBtn")?.addEventListener("click", async () => {
+  const pre = document.getElementById("explainStageDetailPre");
+  if (!pre) return;
+  try { await navigator.clipboard.writeText(pre.textContent || ""); } catch { /* ignore */ }
+});
+document.getElementById("explainToggleFullBtn")?.addEventListener("click", () => {
+  const btn = document.getElementById("explainToggleFullBtn");
+  const pre = document.getElementById("explainResultPre");
+  if (!btn || !pre) return;
+  const willShow = pre.hidden;
+  pre.hidden = !willShow;
+  btn.setAttribute("aria-expanded", String(willShow));
+  btn.textContent = willShow ? "Hide full plan JSON" : "Show full plan JSON";
+});
+document.getElementById("explainClusterSelect")?.addEventListener("change", setExplainRunEnabled);
+document.getElementById("explainRunBtn")?.addEventListener("click", runExplainOnSelectedCluster);
 
 // ─── Init ───────────────────────────────────────────────────────────
 checkHealth();
