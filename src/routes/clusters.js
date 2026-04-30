@@ -71,8 +71,9 @@ router.get("/:id", async (req, res, next) => {
 });
 
 /**
- * Partial update (name, region, uri, Atlas fields). Omitted keys are unchanged.
+ * Partial update (name, region, uri, Atlas fields, isPolling). Omitted keys are unchanged.
  * Empty `atlasPrivateKey` clears the stored private key. Connection pools reload when `uri` changes.
+ * `isPolling: false` pauses scheduled collection for that cluster (no server restart).
  */
 router.patch("/:id", async (req, res, next) => {
   try {
@@ -82,6 +83,14 @@ router.patch("/:id", async (req, res, next) => {
 
     const body = req.body || {};
     const $set = {};
+    const prevPollingEffective = prev.isPolling !== false;
+
+    if (Object.prototype.hasOwnProperty.call(body, "isPolling")) {
+      if (typeof body.isPolling !== "boolean") {
+        return res.status(400).json({ error: "isPolling must be a boolean" });
+      }
+      $set.isPolling = body.isPolling;
+    }
 
     if (Object.prototype.hasOwnProperty.call(body, "name")) {
       const n = String(body.name || "").trim();
@@ -118,15 +127,37 @@ router.patch("/:id", async (req, res, next) => {
     }
 
     const updated = await getDb().collection(COLLECTION).findOne({ _id: oid });
-    await logMonitorEvent({
-      source: "api",
-      action: "cluster.update",
-      outcome: "ok",
-      clusterId: oid,
-      clusterName: updated.name,
-      targetCollection: COLLECTION,
-      detail: `updated: ${Object.keys($set).join(", ")}`,
-    });
+    const newPollingEffective = updated.isPolling !== false;
+    const pollingToggled =
+      Object.prototype.hasOwnProperty.call(body, "isPolling") &&
+      prevPollingEffective !== newPollingEffective;
+
+    if (pollingToggled) {
+      await logMonitorEvent({
+        source: "api",
+        action: "cluster.polling",
+        outcome: "ok",
+        clusterId: oid,
+        clusterName: updated.name,
+        targetCollection: COLLECTION,
+        detail: newPollingEffective ? "collection polling enabled" : "collection polling paused",
+        meta: { isPolling: newPollingEffective },
+      });
+    }
+
+    const isPollingOnlyPatch =
+      Object.keys($set).length === 1 && Object.prototype.hasOwnProperty.call($set, "isPolling");
+    if (!isPollingOnlyPatch) {
+      await logMonitorEvent({
+        source: "api",
+        action: "cluster.update",
+        outcome: "ok",
+        clusterId: oid,
+        clusterName: updated.name,
+        targetCollection: COLLECTION,
+        detail: `updated: ${Object.keys($set).join(", ")}`,
+      });
+    }
     res.json(sanitizeCluster(updated));
   } catch (err) {
     next(err);
@@ -229,6 +260,7 @@ router.post("/", async (req, res, next) => {
       atlasProjectId: atlasProjectId || null,
       atlasPublicKey: atlasPublicKey || null,
       atlasPrivateKey: encryptField(atlasPrivateKey),
+      isPolling: true,
       createdAt: new Date(),
     };
     const result = await getDb().collection(COLLECTION).insertOne(doc);

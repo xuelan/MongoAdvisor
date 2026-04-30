@@ -6,6 +6,7 @@ const { decrypt, isEncrypted } = require("./crypto");
 const { discoverAll } = require("./discovery");
 const { HIDDEN_SET } = require("./hidden-dbs");
 const { logMonitorEvent } = require("./monitor-log");
+const { isClusterPollingEnabled } = require("./cluster-polling");
 
 const CLUSTERS = "clusters";
 const QUERY_STATS = "query_stats";
@@ -310,6 +311,10 @@ async function collectQueryStats(cluster) {
 async function collectQueryStatsAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[queryStats] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const count = await collectQueryStats(cluster);
       console.log(`[queryStats] ${cluster.name}: ${count} entries collected (all nodes)`);
@@ -543,6 +548,10 @@ function parseLogLine(line) {
 async function collectSlowQueriesAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[slowQueries] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const count = await collectSlowQueries(cluster);
       if (count > 0) {
@@ -689,6 +698,10 @@ async function collectIndexStatsForHost(cluster, host, namespaceList) {
 async function collectIndexStatsAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[indexStats] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const topology = await getDb().collection("topologies").findOne({ clusterId: cluster._id });
       const hosts = topology?.hosts?.length ? topology.hosts : [];
@@ -891,6 +904,10 @@ async function collectStorageStats(cluster) {
 async function collectStorageStatsAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[storageStats] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const count = await collectStorageStats(cluster);
       console.log(`[storageStats] ${cluster.name}: ${count} collections scanned`);
@@ -982,6 +999,10 @@ async function collectDiskUsage(cluster) {
 async function collectDiskUsageAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[diskUsage] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const pct = await collectDiskUsage(cluster);
       console.log(`[diskUsage] ${cluster.name}: ${pct}%`);
@@ -1041,6 +1062,10 @@ async function collectOplogWindow(cluster) {
 async function collectOplogWindowAll() {
   const clusters = await getDb().collection(CLUSTERS).find().toArray();
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[oplogWindow] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const hours = await collectOplogWindow(cluster);
       if (hours !== null) {

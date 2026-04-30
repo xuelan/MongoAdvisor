@@ -1,6 +1,6 @@
 # MongoAdvisor
 
-MongoAdvisor rethinks MongoDB observability. Instead of yet another raw-metrics dashboard, it continuously analyzes your clusters and delivers **actionable recommendations** with direct links to the exact playbook — turning insight into action in seconds, not hours. So you can keep innovating and scaling.
+MongoAdvisor rethinks MongoDB observability. Instead of yet another raw-metrics dashboard, or auditing tool, it continuously analyzes your clusters and delivers **actionable recommendations** with direct links to the exact playbook — turning insight into action in seconds, not hours. So you can keep innovating and scaling.
 
 **What it collects (per registered cluster):**
 
@@ -87,19 +87,34 @@ npm run atlas:create-user -- --preset metrics \
   --cluster-name "<Atlas cluster name>"
 ```
 
-Omit `--cluster-name` only if you intentionally want a project-wide database user. Example connection string: `mongodb+srv://metrics_reader:<password>@<host>/?authSource=admin`
+**MongoDB roles for `--preset metrics`** (see `src/atlas-db-users.js`): the user is created with `**databaseName: admin**` (SCRAM / `authSource=admin`) and these built-in roles:
+
+
+| Role              | Database | Purpose                                                                                                  |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `clusterMonitor`  | `admin`  | Server stats, topology, `$queryStats`, `dbStats`, replica set / process info used by the collector       |
+| `readAnyDatabase` | `admin`  | Read user collections across databases for `$indexStats`, storage / fragmentation walks, namespace lists |
+| `read`            | `local`  | Read `local.oplog.rs` for oplog window sampling                                                          |
+
+
+When you pass `**--cluster-name**`, Atlas also attaches a **cluster scope** (`CLUSTER`) so the user applies only to that deployment; omit `--cluster-name` only if you intentionally want a **project-wide** database user.
+
+Example connection string: `mongodb+srv://metrics_reader:<password>@<host>/?authSource=admin`
+
+To run `**airbnb-expand-listings-big.js`** (`$out`) or other sample **writes** from this repo, create a separate `**mongoadvisor_workload`** user with `**--preset workload**` (`readWriteAnyDatabase`) — see [Workload database user (mongoadvisor_workload)](#workload-database-user-mongoadvisor_workload).
 
 ### 4. Configure environment variables
 
 Do **not** commit secrets. Locally, copy `.env.example` to `.env`. In production, set the same variable **names** via your platform (Kubernetes secrets, PaaS env, systemd, etc.):
 
 
-| Variable         | Purpose                                                                          |
-| ---------------- | -------------------------------------------------------------------------------- |
-| `MONGO_URI`      | From step 1 (`authSource=admin` on Atlas)                                        |
-| `MONGO_DB`       | Application database name (default `mongoadvisor`)                               |
-| `ENCRYPTION_KEY` | 64 hex chars — encrypts stored cluster URIs and Atlas private keys in the app DB |
-| `PORT`           | Optional (default `3000`)                                                        |
+| Variable             | Purpose                                                                                                                                                                                                                                                                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MONGO_URI`          | From step 1 (`authSource=admin` on Atlas) — **MongoAdvisor app database** only (`npm start`, `ensure-indexes`, decrypt script reading `clusters`, etc.).                                                                                                                                                                                 |
+| `MONGO_DB`           | Application database name (default `mongoadvisor`)                                                                                                                                                                                                                                                                                       |
+| `ENCRYPTION_KEY`     | 64 hex chars — encrypts stored cluster URIs and Atlas private keys in the app DB                                                                                                                                                                                                                                                         |
+| `PORT`               | Optional (default `3000`)                                                                                                                                                                                                                                                                                                                |
+| `WORKLOAD_MONGO_URI` | **Optional.** If your **sample datasets** (`sample_airbnb`, `sample_mflix`) live on a **different** cluster than the app DB, set this to that cluster’s URI for `workload*.js` and `airbnb-expand-listings-big.js`. If unset, those scripts use `MONGO_URI`. Monitored production URIs stay in the UI / `clusters` collection, not here. |
 
 
 ```bash
@@ -233,7 +248,7 @@ SCRAM users are **not** created from the web UI. Use `npm run atlas:create-user`
 
 | Method | Path                                     | Purpose                                                                                                                                                                                                                    |
 | ------ | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`  | `/api/atlas/database-users/presets`      | Preset ids and descriptions (`backend`, `metrics`).                                                                                                                                                                        |
+| `GET`  | `/api/atlas/database-users/presets`      | Preset ids and descriptions (`backend`, `metrics`, `workload`).                                                                                                                                                            |
 | `GET`  | `/api/atlas/database-users/defaults`     | JSON `{ projectId, publicKey }` from optional env (non-secrets only).                                                                                                                                                      |
 | `POST` | `/api/atlas/database-users`              | Body: `preset`, `projectId`, `publicKey`, `privateKey`, `username`, `password`, optional `clusterName` (Atlas cluster name for scope).                                                                                     |
 | `POST` | `/api/clusters/:id/atlas-database-users` | Uses **stored** Atlas Project ID + API keys on that cluster. Body: `username`, `password`, optional `preset` (default `metrics`), optional `scopeToCluster` (default `true` → scope to the cluster’s registered **name**). |
@@ -284,16 +299,16 @@ Embedded pollers run on fixed intervals (see `src/collector.js`):
 
 Queries from internal agents (`MongoDB Automation Agent`, `MongoDB Monitoring Module`) are filtered at ingestion for `$queryStats`.
 
-
-
 ### Stored document timestamp (query_stats and slow_queries)
 
 Time filters (`since`, time range in the UI) and sorts use the `timestamp` field on each stored row. It does **not** always mean "the instant that user query finished":
 
-| Collection | What `timestamp` represents |
-| --- | --- |
-| `query_stats` | Prefer `metrics.latestSeenTimestamp`: UTC when the server last **observed activity** for this stats key (still aggregated — not a single query's "finished at" instant). If missing, use `asOf`: UTC when that partition row was read from the [`$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/) virtual collection (also not per-query event time). Then **poll time**. `metrics.lastExecutionMicros` is execution *duration*, not a calendar time — it is not used as `timestamp`. |
-| `slow_queries` | Prefer the **log event time** parsed from the Performance Advisor line (MongoDB structured log field `t`). If that cannot be parsed, `timestamp` is the **collector run time** when the slow-query batch was ingested. |
+
+| Collection     | What `timestamp` represents                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query_stats`  | Prefer `metrics.latestSeenTimestamp`: UTC when the server last **observed activity** for this stats key (still aggregated — not a single query's "finished at" instant). If missing, use `asOf`: UTC when that partition row was read from the `[$queryStats](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)` virtual collection (also not per-query event time). Then **poll time**. `metrics.lastExecutionMicros` is execution *duration*, not a calendar time — it is not used as `timestamp`. |
+| `slow_queries` | Prefer the **log event time** parsed from the Performance Advisor line (MongoDB structured log field `t`). If that cannot be parsed, `timestamp` is the **collector run time** when the slow-query batch was ingested.                                                                                                                                                                                                                                                                                                             |
+
 
 Metrics routes filter with `since` against this same `timestamp` field.
 
@@ -303,11 +318,11 @@ Metrics routes filter with `since` against this same `timestamp` field.
 BSON **Date** values represent a **single instant in time** (internally: milliseconds since the Unix epoch). Tools such as Compass usually render that as **UTC ISO** (suffix `Z` or `+00:00`). That is a **display convention** for the same moment you would read on a wall clock in any timezone, not a second parallel timeline.
 
 
-| Source                       | What you see / store                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `query_stats.timestamp` | Prefer `metrics.latestSeenTimestamp`, then `asOf`, then `new Date()` at poll time ([`$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)). The collector reads `latestSeenTimestamp` from the same **cloned** `metrics` subdocument that is stored (EJSON round-trip can change BSON shapes from the raw cursor), so `timestamp` matches `metrics.latestSeenTimestamp` when that field is present and parseable. `asOf` is partition read time, not a single-query event time. |
-| `slow_queries.timestamp` | Prefer log event time from structured field `t` in [MongoDB log lines](https://www.mongodb.com/docs/manual/reference/log-messages/) (UTC in JSON). If unparsed, collector ingest time. |
-| `monitor_logs.timestamp` | Set when the row is written (`new Date()` on the Node process). Still a BSON instant; server OS timezone does not create a second stored clock. |
+| Source                   | What you see / store                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `query_stats.timestamp`  | Prefer `metrics.latestSeenTimestamp`, then `asOf`, then `new Date()` at poll time (`[$queryStats](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)`). The collector reads `latestSeenTimestamp` from the same **cloned** `metrics` subdocument that is stored (EJSON round-trip can change BSON shapes from the raw cursor), so `timestamp` matches `metrics.latestSeenTimestamp` when that field is present and parseable. `asOf` is partition read time, not a single-query event time. |
+| `slow_queries.timestamp` | Prefer log event time from structured field `t` in [MongoDB log lines](https://www.mongodb.com/docs/manual/reference/log-messages/) (UTC in JSON). If unparsed, collector ingest time.                                                                                                                                                                                                                                                                                                                                   |
+| `monitor_logs.timestamp` | Set when the row is written (`new Date()` on the Node process). Still a BSON instant; server OS timezone does not create a second stored clock.                                                                                                                                                                                                                                                                                                                                                                          |
 
 
 **Dashboard UI (`public/app.js`)**  
@@ -385,32 +400,57 @@ npm run indexes:ensure
 # Or: node scripts/ensure-indexes.js
 ```
 
-Uses `MONGO_URI` and `MONGO_DB` from `.env` (same as the app). The script is [`scripts/ensure-indexes.js`](scripts/ensure-indexes.js); it does **not** run from [`src/db.js`](src/db.js).
+Uses `MONGO_URI` and `MONGO_DB` from `.env` (same as the app). The script is `[scripts/ensure-indexes.js](scripts/ensure-indexes.js)`; it does **not** run from `[src/db.js](src/db.js)`.
 
 
-| Collection      | Index name                         | Keys                                                            | Unique        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------- | ---------------------------------- | --------------------------------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `query_stats`   | `uniq_query_stats_observation`     | `clusterId`, `host`, `timestamp`, `keyHash`, `queryShapeHash`   | yes           | One stored row per observation key **including `timestamp`**. Stored `timestamp` prefers `metrics.latestSeenTimestamp`, then `asOf`, then poll time ([`$queryStats`](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)). `bulkWrite` upserts use this full key set. When `latestSeenTimestamp` moves forward, a **new** row can appear (new instant in the compound key). `keyHash` may be null on older servers. |
-| `slow_queries`  | `uniq_slow_log_dedupe`             | `clusterId`, `host`, `id`, `timestamp`, `millis`, `ctx`         | yes (partial) | Same logical key as `{ id, timestamp, millis, ctx, host }` plus `clusterId` so tenants do not collide. Partial index applies only when `id` is numeric ([log messages](https://www.mongodb.com/docs/manual/reference/log-messages/#filtering-by-known-log-id)). The collector `bulkWrite` upserts on that key set; `ctx` is stored as `""` when missing. Rows without a numeric `id` are `insertMany` only (not in the partial unique set — duplicates possible on re-poll). |
-| `topologies`    | `uniq_topology_per_cluster`        | `clusterId`                                                     | yes           | At most one topology document per cluster.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `monitor_logs`  | `monitor_logs_timestamp`           | `timestamp` (desc)                                              | no            | Recent audit rows for `/api/metrics/monitor-logs`.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `index_stats`   | `index_stats_cluster_type_host_ns` | `clusterId`, `type`, `host`, `namespace`                        | no            | Unused / redundant index listings.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `storage_stats` | `storage_stats_cluster_ns`         | `clusterId`, `namespace`                                        | no            | Storage scan rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `disk_usage`    | `disk_usage_cluster_time`          | `clusterId`, `timestamp` (desc)                                 | no            | Latest disk samples per cluster.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `oplog_window`  | `oplog_window_cluster_time`        | `clusterId`, `timestamp` (desc)                                 | no            | Latest oplog window samples.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Collection      | Index name                         | Keys                                                          | Unique        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------------- | ---------------------------------- | ------------------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `query_stats`   | `uniq_query_stats_observation`     | `clusterId`, `host`, `timestamp`, `keyHash`, `queryShapeHash` | yes           | One stored row per observation key **including `timestamp`**. Stored `timestamp` prefers `metrics.latestSeenTimestamp`, then `asOf`, then poll time (`[$queryStats](https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/)`). `bulkWrite` upserts use this full key set. When `latestSeenTimestamp` moves forward, a **new** row can appear (new instant in the compound key). `keyHash` may be null on older servers.                              |
+| `slow_queries`  | `uniq_slow_log_dedupe`             | `clusterId`, `host`, `id`, `timestamp`, `millis`, `ctx`       | yes (partial) | Same logical key as `{ id, timestamp, millis, ctx, host }` plus `clusterId` so tenants do not collide. Partial index applies only when `id` is numeric ([log messages](https://www.mongodb.com/docs/manual/reference/log-messages/#filtering-by-known-log-id)). The collector `bulkWrite` upserts on that key set; `ctx` is stored as `""` when missing. Rows without a numeric `id` are `insertMany` only (not in the partial unique set — duplicates possible on re-poll). |
+| `topologies`    | `uniq_topology_per_cluster`        | `clusterId`                                                   | yes           | At most one topology document per cluster.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `monitor_logs`  | `monitor_logs_timestamp`           | `timestamp` (desc)                                            | no            | Recent audit rows for `/api/metrics/monitor-logs`.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `index_stats`   | `index_stats_cluster_type_host_ns` | `clusterId`, `type`, `host`, `namespace`                      | no            | Unused / redundant index listings.                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `storage_stats` | `storage_stats_cluster_ns`         | `clusterId`, `namespace`                                      | no            | Storage scan rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `disk_usage`    | `disk_usage_cluster_time`          | `clusterId`, `timestamp` (desc)                               | no            | Latest disk samples per cluster.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `oplog_window`  | `oplog_window_cluster_time`        | `clusterId`, `timestamp` (desc)                               | no            | Latest oplog window samples.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 
 All collections also have the default `_id` index. `clusters` is not listed above (only `_id` unless you add your own).
 
 If `createIndex` fails (usually duplicate keys in existing data), clean duplicates or drop conflicting indexes, then run `npm run indexes:ensure` again.
 
+### Decrypt a stored credential (`scripts/decrypt-field.js`)
+
+MongoAdvisor stores sensitive cluster fields (`**uri`**, `**atlasPrivateKey**`) in the application database as **AES-256-GCM** ciphertext (see `[src/crypto.js](src/crypto.js)`). The API and UI never return the full plaintext URI.
+
+If you **operate** the deployment and still have the same `**ENCRYPTION_KEY`** as when the value was written, you can decrypt a copied field locally for recovery or verification. **Do not** commit ciphertext or plaintext; treat script output like any other secret.
+
+**Prerequisites:** `.env` in the repo root with `**ENCRYPTION_KEY`** (64 hex characters — same as the running app).
+
+**Get the ciphertext:** In MongoDB Compass, `mongosh`, or any client connected to the **application** database, read `mongoadvisor.clusters` (or your `MONGO_DB`) and copy the **string value** of `uri` or `atlasPrivateKey` (three colon-separated hex segments: IV, auth tag, ciphertext).
+
+**Run:**
+
+```bash
+# Pass the packed string as one argument (quote it in the shell — it contains colons)
+npm run decrypt:field -- '<ivHex:tagHex:cipherHex>'
+
+# Equivalent
+node scripts/decrypt-field.js '<ivHex:tagHex:cipherHex>'
+
+# Or pipe (useful if the string is very long)
+echo '<ivHex:tagHex:cipherHex>' | node scripts/decrypt-field.js --stdin
+```
+
+The script prints a **stderr** warning, then writes the **plaintext** to **stdout** (for example a full `mongodb+srv://…` connection string). If the input is not in MongoAdvisor encrypted format, or the key is wrong, it exits with an error.
+
 ### Slow query document fields (log-derived)
 
 
-| Field       | Source                                                                                                               |
-| ----------- | -------------------------------------------------------------------------------------------------------------------- |
-| `id`        | Top-level `id` in the JSON slow-operation log line (integer), when present. |
-| `ctx`       | Top-level `ctx` (e.g. connection thread id). Stored as `""` when missing so the unique index remains stable. |
+| Field       | Source                                                                                                           |
+| ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| `id`        | Top-level `id` in the JSON slow-operation log line (integer), when present.                                      |
+| `ctx`       | Top-level `ctx` (e.g. connection thread id). Stored as `""` when missing so the unique index remains stable.     |
 | `truncated` | `true` / `false` when the log exposes a `truncated` field (top-level or under `attr`); omitted when not present. |
 
 
@@ -438,6 +478,9 @@ public/
 
 scripts/
 ├── ensure-indexes.js       # npm run indexes:ensure — app DB indexes (not run on server start)
+├── decrypt-field.js        # npm run decrypt:field — decrypt stored uri / atlasPrivateKey (ENCRYPTION_KEY from .env)
+├── workload-uri.js         # resolve WORKLOAD_MONGO_URI || MONGO_URI for workload scripts
+├── airbnb-expand-listings-big.js  # build sample_airbnb.listingsAndReviews_big from listingsAndReviews ($range + $unwind)
 ├── workload.js             # Orchestrator: runs all workloads in parallel
 ├── workload-agg.js         # sample_airbnb analytics pipeline
 ├── workload-agg2.js        # sample_airbnb seasonal pipeline
@@ -447,17 +490,65 @@ scripts/
 
 ## Workload generation
 
-Scripts target the Atlas sample datasets (`sample_airbnb`, `sample_mflix`) so you have something meaningful to observe while developing or demoing. Every query sets a descriptive `appName` and `comment`, so you can slice the resulting `$queryStats` and Atlas slow-log rows by logical workload in the dashboard.
+### First steps: load sample data in Atlas
+
+The workload scripts expect Atlas’s built-in **sample databases** (notably `sample_airbnb` and `sample_mflix`). Before running them:
+
+1. **Create or pick an Atlas cluster** in the same project you will connect to with your workload connection string (often the **monitored** cluster or a dedicated demo cluster).
+2. **Load sample data** from the Atlas UI or Atlas CLI — you need **Project Owner** on that project (organization owners must add themselves as project owners if needed). Follow MongoDB’s guide: **[Load sample data into Atlas](https://www.mongodb.com/docs/atlas/sample-data/load-sample-data/#std-label-load-sample-data)**.
+3. Confirm in Compass or `mongosh` that databases such as `**sample_airbnb`** and `**sample_mflix**` exist on that cluster, then configure the URI your scripts use (see [Workload connection string](#workload-connection-string) below).
+
+### Workload database user (mongoadvisor_workload)
+
+The `**metrics_reader**` style user (`[--preset metrics](#3-create-the-monitored-cluster-database-user-scram)`) can **read** `sample_airbnb` / `sample_mflix` but cannot run `**$out`** in `[scripts/airbnb-expand-listings-big.js](scripts/airbnb-expand-listings-big.js)` (Atlas returns `not authorized`). For local **workload** and **expand** tooling, create a separate SCRAM user with `**--preset workload`**, which grants `**readWriteAnyDatabase**` on `admin` (SCRAM / `authSource=admin`) — enough to read sample data and write `listingsAndReviews_big`.
+
+**Security:** `readWriteAnyDatabase` is powerful. Use this user **only** for dev/demo workloads on a cluster you control. **Do not** register it as the monitored cluster connection in the MongoAdvisor UI for production (keep `**metrics_reader`** there).
+
+Create the user (same bootstrap API keys as other `atlas:create-user` flows; project = cluster where sample data lives):
+
+```bash
+export ATLAS_NEW_USER_PASSWORD='...'
+npm run atlas:create-user -- --preset workload \
+  --project-id "<ATLAS_PROJECT_ID>" \
+  --public-key "<BOOTSTRAP_PUBLIC_KEY>" \
+  --private-key "<BOOTSTRAP_PRIVATE_KEY>" \
+  --username mongoadvisor_workload \
+  --cluster-name "<Atlas cluster name>"
+```
+
+Then point `**WORKLOAD_MONGO_URI**` at that user (see [Configure environment variables](#4-configure-environment-variables)):
+
+```env
+WORKLOAD_MONGO_URI=mongodb+srv://mongoadvisor_workload:<password>@<host>/?authSource=admin
+```
+
+**MongoDB role for `--preset workload`** (see `src/atlas-db-users.js`): `readWriteAnyDatabase` @ `admin` ([built-in role](https://www.mongodb.com/docs/manual/reference/built-in-roles/#mongodb-authrole-readWriteAnyDatabase) — read/write all non-system databases).
+
+### Expand Airbnb listings (optional, for heavier workloads)
+
+`workload-agg.js` and `workload-agg2.js` aggregate against `**sample_airbnb.listingsAndReviews_big**`. That collection is not part of the default Atlas sample load; build it once from `**listingsAndReviews**` by repeating each document with `$addFields` → `$range` → `$unwind`:
+
+```bash
+node scripts/airbnb-expand-listings-big.js     # default 10 copies per listing (~10× row count)
+node scripts/airbnb-expand-listings-big.js 25  # 25 copies per listing
+```
+
+Requires a user with `**readWriteAnyDatabase**` (or narrower write on `sample_airbnb`) — use `**mongoadvisor_workload**` from the previous subsection, not `**metrics_reader**`. See `[scripts/airbnb-expand-listings-big.js](scripts/airbnb-expand-listings-big.js)`.
+
+Scripts target those sample datasets so you have something meaningful to observe while developing or demoing. Every query sets a descriptive `appName` and `comment`, so you can slice the resulting `$queryStats` and Atlas slow-log rows by logical workload in the dashboard.
 
 ### Available scripts
 
-| Script | Dataset | What it does |
-| --- | --- | --- |
-| `workload.js` | all | Runs the other three scripts in parallel with a randomized iteration count. |
-| `workload-agg.js` | `sample_airbnb` | Heavy host/listings lookup + group pipeline. |
-| `workload-agg2.js` | `sample_airbnb` | Reviews unwind + seasonal rollups pipeline. |
-| `workload-mflix.js` | `sample_mflix` | Mixed aggregate + find workloads across mflix collections (intentionally includes some heavy shapes). |
-| `workload-mflix-fast.js` | `sample_mflix` | **Fast, index-only** loop across every mflix collection. Runs for 5 minutes by default and only uses existing indexes (`cast`, `cast+runtime`, `genres`, `rated`, `runtime`, `email`, `user_id`, `location.geo` 2dsphere, `_id`, text index). |
+
+| Script                          | Dataset         | What it does                                                                                                                                                                                                                                  |
+| ------------------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `airbnb-expand-listings-big.js` | `sample_airbnb` | One-time data prep: copies `listingsAndReviews` into `listingsAndReviews_big` (default **10×** per doc, argv or `AIRBNB_EXPAND_TIMES`). Uses `WORKLOAD_MONGO_URI` or `MONGO_URI`. Used by `workload-agg*.js`.                                 |
+| `workload.js`                   | all             | Runs the other three scripts in parallel with a randomized iteration count.                                                                                                                                                                   |
+| `workload-agg.js`               | `sample_airbnb` | Heavy host/listings lookup + group pipeline.                                                                                                                                                                                                  |
+| `workload-agg2.js`              | `sample_airbnb` | Reviews unwind + seasonal rollups pipeline.                                                                                                                                                                                                   |
+| `workload-mflix.js`             | `sample_mflix`  | Mixed aggregate + find workloads across mflix collections (intentionally includes some heavy shapes).                                                                                                                                         |
+| `workload-mflix-fast.js`        | `sample_mflix`  | **Fast, index-only** loop across every mflix collection. Runs for 5 minutes by default and only uses existing indexes (`cast`, `cast+runtime`, `genres`, `rated`, `runtime`, `email`, `user_id`, `location.geo` 2dsphere, `_id`, text index). |
+
 
 ### Usage
 
@@ -477,16 +568,25 @@ node scripts/workload-mflix-fast.js
 DURATION_MS=60000 node scripts/workload-mflix-fast.js   # 1 minute
 ```
 
+### Workload connection string
+
+**Two-cluster setup:** `npm start` always uses `**MONGO_URI`** → MongoAdvisor **application** database (`mongoadvisor`). **Monitored** clusters are separate: you register each URI in the **UI** (stored encrypted in `clusters`). For **local workload scripts** only, if sample data is on another host than the app DB, set `**WORKLOAD_MONGO_URI`** in `.env` to that cluster’s connection string; the scripts use `resolveWorkloadMongoUri()` in `[scripts/workload-uri.js](scripts/workload-uri.js)` (`WORKLOAD_MONGO_URI` if set, otherwise `MONGO_URI`).
+
+If the app DB cluster **also** has `sample_airbnb` / `sample_mflix`, you can omit `WORKLOAD_MONGO_URI` and point `MONGO_URI` at a user that can read both `mongoadvisor` and the sample DBs (see bootstrap `readAnyDatabase` note in [step 1 — backend application user](#1-create-the-backend-application-user-scram)).
+
 ### Useful environment variables
 
-| Variable | Script(s) | Purpose |
-| --- | --- | --- |
-| `READ_PREF` | all | Force `primary` or `secondary`; randomized per run otherwise. |
-| `DURATION_MS` | `workload-mflix-fast.js` | Total run time in ms (default `300000`). |
-| `MIN_SLEEP_MS` / `MAX_SLEEP_MS` | `workload-mflix-fast.js` | Jitter between ops (defaults `80` / `350`). |
-| `MAX_TIME_MS` | `workload-mflix-fast.js` | Per-query `maxTimeMS` cap (default `5000`). |
-| `MFLIX_EMBEDDED_CAP` / `MFLIX_LOOKUP_CAP` / `MFLIX_OUTLIER_CAP` | `workload-mflix.js` | Shrink pipeline working sets to keep latency reasonable on small clusters. |
-| `AIRBNB_SEASON_CAP` | `workload-agg2.js` | Cap listings processed before `$unwind: $reviews`. |
+
+| Variable                                                        | Script(s)                                        | Purpose                                                                                   |
+| --------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `WORKLOAD_MONGO_URI`                                            | `workload-*.js`, `airbnb-expand-listings-big.js` | Optional; overrides `MONGO_URI` for those scripts when sample data is on another cluster. |
+| `READ_PREF`                                                     | all                                              | Force `primary` or `secondary`; randomized per run otherwise.                             |
+| `DURATION_MS`                                                   | `workload-mflix-fast.js`                         | Total run time in ms (default `300000`).                                                  |
+| `MIN_SLEEP_MS` / `MAX_SLEEP_MS`                                 | `workload-mflix-fast.js`                         | Jitter between ops (defaults `80` / `350`).                                               |
+| `MAX_TIME_MS`                                                   | `workload-mflix-fast.js`                         | Per-query `maxTimeMS` cap (default `5000`).                                               |
+| `MFLIX_EMBEDDED_CAP` / `MFLIX_LOOKUP_CAP` / `MFLIX_OUTLIER_CAP` | `workload-mflix.js`                              | Shrink pipeline working sets to keep latency reasonable on small clusters.                |
+| `AIRBNB_SEASON_CAP`                                             | `workload-agg2.js`                               | Cap listings processed before `$unwind: $reviews`.                                        |
+
 
 The fast mflix loop uses a distinct `appName` per query template (for example `workload-mflix-fast-em-cast`, `workload-mflix-fast-theaters-near`, `workload-mflix-fast-movies-text`), so each index-backed shape shows up as its own entry in the dashboard’s per-app charts.
 
@@ -513,4 +613,8 @@ Source cluster URIs and Atlas private API keys are **encrypted at rest** (AES-25
 3. **Safety rails.** Pause metadata-scanning pollers (indexes, storage) when a cluster looks risky to sweep — e.g. very high collection/index counts — to avoid hammering shared infrastructure.
 4. **More indexes.** Add indexes for any new access patterns introduced by future dashboards and API endpoints.
 5. **Sharded cluster support.** Currently only replica sets are covered end-to-end.
+6. Integration: next.js currently expression.js 5
+7. Test mongo7
+8. executionstats remvoe PROD
+9. title in French
 

@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "atlas:create-user": "node scripts/atlas-create-db-user.js",
-    "indexes:ensure": "node scripts/ensure-indexes.js"
+    "indexes:ensure": "node scripts/ensure-indexes.js",
+    "decrypt:field": "node scripts/decrypt-field.js"
   },
   "keywords": [
     "mongodb",

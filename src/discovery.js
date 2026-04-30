@@ -1,6 +1,7 @@
 const { getDb } = require("./db");
 const { ensureConnected } = require("./pool-cache");
 const { logMonitorEvent } = require("./monitor-log");
+const { isClusterPollingEnabled } = require("./cluster-polling");
 
 const TOPOLOGIES = "topologies";
 const CLUSTERS = "clusters";
@@ -52,6 +53,10 @@ async function discoverAll() {
   const results = [];
 
   for (const cluster of clusters) {
+    if (!isClusterPollingEnabled(cluster)) {
+      console.log(`[discovery] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
     try {
       const topology = await discoverOne(cluster);
       results.push(topology);

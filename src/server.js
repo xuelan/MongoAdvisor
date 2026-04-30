@@ -21,6 +21,13 @@ app.use("/api/atlas", require("./routes/atlas-admin"));
 app.use("/api/topologies", require("./routes/topologies"));
 app.use("/api/metrics", require("./routes/metrics"));
 
+app.use((err, _req, res, _next) => {
+  const status = err.statusCode || err.status || 500;
+  if (!res.headersSent) {
+    res.status(status).json({ error: err.message || "Server error" });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 async function start() {

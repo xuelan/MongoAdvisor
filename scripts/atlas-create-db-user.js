@@ -10,6 +10,7 @@
  * Usage:
  *   node scripts/atlas-create-db-user.js --preset backend --project-id <GROUP_ID> \
  *     --public-key <KEY> --private-key <SECRET> --username mongoadvisor_app
+ *   node scripts/atlas-create-db-user.js --preset workload ... --username mongoadvisor_workload
  *
  * Password: set ATLAS_NEW_USER_PASSWORD, or pass --password (discouraged on shared shells),
  * or pipe: echo 'secret' | node scripts/atlas-create-db-user.js ... --password-stdin
@@ -68,7 +69,7 @@ async function main() {
   }
 
   if (args.help) {
-    console.log(`Usage: node scripts/atlas-create-db-user.js --preset <backend|metrics> [options]
+    console.log(`Usage: node scripts/atlas-create-db-user.js --preset <backend|metrics|workload> [options]
 
 Options:
   --project-id      Atlas project (group) ID
@@ -101,7 +102,7 @@ ${PRESET_HELP}
   }
 
   if (!preset) {
-    console.error('Set --preset to "backend" or "metrics".');
+    console.error('Set --preset to "backend", "metrics", or "workload".');
     process.exit(1);
   }
 

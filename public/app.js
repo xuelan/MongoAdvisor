@@ -143,12 +143,26 @@ function renderTopology(clusterId) {
 
 // Keep in sync with src/hidden-dbs.js (HIDDEN_TOP_LEVEL_DBS)
 const HIDDEN_DBS = ["admin", "config", "local", "mongoadvisor", "#mongodb-mcp"];
-let allNamespaces = [];
-let visibleNamespaces = [];
+let allDatabases = [];
+let visibleDatabases = [];
 let allHosts = [];
 
-function isHiddenNs(ns) {
-  return HIDDEN_DBS.includes(ns.split(".")[0]);
+const DASH_CLUSTER_LS = "mongoadvisor.dashboardClusterId";
+
+function getDashboardClusterId() {
+  const sel = document.getElementById("dashboardClusterSelect");
+  if (!sel || sel.disabled || !sel.value) return "";
+  return String(sel.value);
+}
+
+function dashboardClusterQuery() {
+  const cid = getDashboardClusterId();
+  if (!cid) return "";
+  return `?${new URLSearchParams({ clusterId: cid }).toString()}`;
+}
+
+function isHiddenDbName(db) {
+  return HIDDEN_DBS.includes(db);
 }
 
 function getChecked(selector) {
@@ -156,7 +170,7 @@ function getChecked(selector) {
   return [...boxes].filter((b) => b.checked).map((b) => b.value);
 }
 
-function getSelectedNamespaces() { return getChecked("#nsFilter"); }
+function getSelectedDatabases() { return getChecked("#dbFilter"); }
 function getSelectedHosts() { return getChecked("#hostFilter"); }
 
 function getTimeRange() {
@@ -174,7 +188,9 @@ document.getElementById("timeRangeGroup").addEventListener("click", (e) => {
 
 function metricsParams() {
   const params = new URLSearchParams();
-  for (const ns of getSelectedNamespaces()) params.append("namespace", ns);
+  const cid = getDashboardClusterId();
+  if (cid) params.set("clusterId", cid);
+  for (const db of getSelectedDatabases()) params.append("database", db);
   for (const h of getSelectedHosts()) params.append("host", h);
   const range = getTimeRange();
   if (range) {
@@ -184,10 +200,13 @@ function metricsParams() {
   return params;
 }
 
-/** Index list APIs: host filter only. Do not pass namespace — $queryStats namespaces omit collections with no recent traffic but indexes still exist there. */
+/** Index list APIs: host + optional database (prefix on namespace). Do not pass per-collection namespace — query_stats may omit cold collections but index_stats still has them. */
 function indexListParams() {
   const params = new URLSearchParams();
+  const cid = getDashboardClusterId();
+  if (cid) params.set("clusterId", cid);
   for (const h of getSelectedHosts()) params.append("host", h);
+  for (const db of getSelectedDatabases()) params.append("database", db);
   const q = params.toString();
   return q ? `?${q}` : "";
 }
@@ -198,7 +217,7 @@ function shortHost(h) {
 
 async function loadHosts() {
   try {
-    const res = await fetch(`${API}/api/metrics/hosts`);
+    const res = await fetch(`${API}/api/metrics/hosts${dashboardClusterQuery()}`);
     allHosts = await res.json();
     const container = document.getElementById("hostFilter");
     const prev = getSelectedHosts();
@@ -217,19 +236,19 @@ async function loadHosts() {
   } catch { /* ignore */ }
 }
 
-async function loadNamespaces() {
+async function loadDatabases() {
   try {
-    const res = await fetch(`${API}/api/metrics/namespaces`);
-    allNamespaces = await res.json();
-    visibleNamespaces = allNamespaces.filter((ns) => !isHiddenNs(ns));
-    const container = document.getElementById("nsFilter");
-    const prev = getSelectedNamespaces();
+    const res = await fetch(`${API}/api/metrics/databases${dashboardClusterQuery()}`);
+    allDatabases = await res.json();
+    visibleDatabases = allDatabases.filter((db) => !isHiddenDbName(db));
+    const container = document.getElementById("dbFilter");
+    const prev = getSelectedDatabases();
     const isFirst = container.children.length === 0;
 
-    container.innerHTML = visibleNamespaces.map((ns) => {
-      const checked = isFirst ? true : prev.includes(ns);
+    container.innerHTML = visibleDatabases.map((db) => {
+      const checked = isFirst ? true : prev.includes(db);
       return `<label class="ns-cb">
-        <input type="checkbox" value="${ns}"${checked ? " checked" : ""}> ${ns}
+        <input type="checkbox" value="${db}"${checked ? " checked" : ""}> ${db}
       </label>`;
     }).join("");
 
@@ -239,12 +258,12 @@ async function loadNamespaces() {
   } catch { /* ignore */ }
 }
 
-function nsSelectAll() {
-  document.querySelectorAll("#nsFilter input").forEach((cb) => { cb.checked = true; });
+function dbSelectAll() {
+  document.querySelectorAll("#dbFilter input").forEach((cb) => { cb.checked = true; });
   loadMetrics();
 }
-function nsSelectNone() {
-  document.querySelectorAll("#nsFilter input").forEach((cb) => { cb.checked = false; });
+function dbSelectNone() {
+  document.querySelectorAll("#dbFilter input").forEach((cb) => { cb.checked = false; });
   loadMetrics();
 }
 function hostSelectAll() {
@@ -259,7 +278,7 @@ function hostSelectNone() {
 // ─── Metrics ────────────────────────────────────────────────────────
 
 async function loadMetrics() {
-  if (!getSelectedNamespaces().length || !getSelectedHosts().length) {
+  if (!getSelectedDatabases().length || !getSelectedHosts().length) {
     destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart, bubbleChart, treemapIOChart, treemapCPUChart]);
     appLoadExecChart = appLoadTimeChart = slowestAppChart = bubbleChart = treemapIOChart = treemapCPUChart = null;
   } else {
@@ -1005,8 +1024,11 @@ function storageGoPage(p) {
 async function loadStorageStats() {
   try {
     const params = new URLSearchParams();
-    for (const ns of getSelectedNamespaces()) params.append("namespace", ns);
-    const res = await fetch(`${API}/api/metrics/storage?${params}`)
+    const cid = getDashboardClusterId();
+    if (cid) params.set("clusterId", cid);
+    for (const db of getSelectedDatabases()) params.append("database", db);
+    const q = params.toString();
+    const res = await fetch(`${API}/api/metrics/storage${q ? `?${q}` : ""}`);
     storageData = await res.json();
     renderStorageTable();
   } catch {
@@ -1078,6 +1100,29 @@ function clusterDisplayName(all, c) {
   return c.name;
 }
 
+function populateDashboardClusterSelect() {
+  const sel = document.getElementById("dashboardClusterSelect");
+  if (!sel) return;
+  if (!clusters.length) {
+    sel.innerHTML = '<option value="">No clusters registered</option>';
+    sel.disabled = true;
+    localStorage.removeItem(DASH_CLUSTER_LS);
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = clusters
+    .map(
+      (c) =>
+        `<option value="${escAttr(String(c._id))}">${escAttr(clusterDisplayName(clusters, c))}</option>`,
+    )
+    .join("");
+  const stored = localStorage.getItem(DASH_CLUSTER_LS);
+  const fallback = String(clusters[0]._id);
+  const pick = stored && clusters.some((c) => String(c._id) === stored) ? stored : fallback;
+  sel.value = pick;
+  localStorage.setItem(DASH_CLUSTER_LS, pick);
+}
+
 async function loadClusters() {
   const list = document.getElementById("clusterList");
   try {
@@ -1087,29 +1132,37 @@ async function loadClusters() {
     populateClusterEditSelect();
     if (!clusters.length) {
       list.innerHTML = '<li class="empty">No clusters registered yet.</li>';
+      populateDashboardClusterSelect();
       return;
     }
     list.innerHTML = clusters
       .map((c) => {
         const displayName = clusterDisplayName(clusters, c);
+        const pollingOff = c.isPolling === false;
         return `
       <li>
         <div class="cluster-header">
           <div>
             <span class="cluster-name">${displayName}</span>
             <span class="cluster-meta"> — ${escAttr(c.region || "")}</span>
+            ${pollingOff ? '<span class="cluster-polling-paused" title="Scheduled metrics collection is paused for this cluster">polling paused</span>' : ""}
             ${c.atlasProjectId ? `<a class="atlas-link" href="https://cloud.mongodb.com/v2/${c.atlasProjectId}#/clusters/detail/${c.name}" target="_blank">Atlas Console</a>` : ""}
           </div>
-          <button class="btn btn-sm" onclick="removeCluster('${c._id}')">Remove</button>
+          <div class="cluster-header-actions">
+            <button type="button" class="btn btn-sm ${pollingOff ? "btn-secondary" : ""}" onclick="toggleClusterPolling('${c._id}')">${pollingOff ? "Resume polling" : "Pause polling"}</button>
+            <button type="button" class="btn btn-sm" onclick="removeCluster('${c._id}')">Remove</button>
+          </div>
         </div>
         ${renderTopology(c._id)}
       </li>`;
       })
       .join("");
+    populateDashboardClusterSelect();
   } catch {
     clusters = [];
     populateClusterEditSelect();
     list.innerHTML = '<li class="empty">Failed to load clusters.</li>';
+    populateDashboardClusterSelect();
   }
 }
 
@@ -1153,6 +1206,28 @@ document.getElementById("addForm").addEventListener("submit", async (e) => {
 async function removeCluster(id) {
   await fetch(`${API}/api/clusters/${id}`, { method: "DELETE" });
   loadClusters();
+}
+
+async function toggleClusterPolling(id) {
+  const c = clusters.find((x) => String(x._id) === String(id));
+  const currentlyEnabled = c ? c.isPolling !== false : true;
+  const next = !currentlyEnabled;
+  try {
+    const res = await fetch(`${API}/api/clusters/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isPolling: next }),
+    });
+    const errBody = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showClusterFormFeedback(errBody.error || `Could not update polling (${res.status})`, true);
+      return;
+    }
+    showClusterFormFeedback(next ? "Polling enabled for this cluster." : "Polling paused for this cluster.", false);
+    await loadClusters();
+  } catch (err) {
+    showClusterFormFeedback(err.message || "Network error", true);
+  }
 }
 
 document.getElementById("clusterEditSelect")?.addEventListener("change", async () => {
@@ -1258,7 +1333,7 @@ function diskLevel(pct) {
 async function loadDiskUsage() {
   const container = document.getElementById("diskUsageContent");
   try {
-    const res = await fetch(`${API}/api/metrics/disk-usage`);
+    const res = await fetch(`${API}/api/metrics/disk-usage${dashboardClusterQuery()}`);
     const data = await res.json();
     if (!data.length) {
       container.innerHTML = '<span class="empty">No disk data yet</span>';
@@ -1312,7 +1387,7 @@ function oplogLevel(hours) {
 async function loadOplogWindow() {
   const container = document.getElementById("oplogContent");
   try {
-    const res = await fetch(`${API}/api/metrics/oplog-window`);
+    const res = await fetch(`${API}/api/metrics/oplog-window${dashboardClusterQuery()}`);
     const text = await res.text();
     let data;
     try {
@@ -1488,6 +1563,8 @@ async function loadExplainQueryBody() {
   if (explainCurrent.comment !== undefined) params.set("comment", explainCurrent.comment);
   if (explainCurrent.namespace) params.set("namespace", explainCurrent.namespace);
   for (const h of getSelectedHosts()) params.append("host", h);
+  const dashCid = getDashboardClusterId();
+  if (dashCid) params.set("clusterId", dashCid);
 
   try {
     const res = await fetch(`${API}/api/metrics/slow-query-sample?${params}`);
@@ -1876,20 +1953,33 @@ document.getElementById("explainToggleFullBtn")?.addEventListener("click", () =>
 document.getElementById("explainClusterSelect")?.addEventListener("change", setExplainRunEnabled);
 document.getElementById("explainRunBtn")?.addEventListener("click", runExplainOnSelectedCluster);
 
-// ─── Init ───────────────────────────────────────────────────────────
-checkHealth();
-loadClusters();
-loadDiskUsage();
-loadOplogWindow();
-loadStorageStats();
-Promise.all([loadNamespaces(), loadHosts()]).then(() => loadMetrics());
-
-setInterval(() => {
-  checkHealth();
-  loadNamespaces();
+document.getElementById("dashboardClusterSelect")?.addEventListener("change", () => {
+  const sel = document.getElementById("dashboardClusterSelect");
+  if (sel?.value) localStorage.setItem(DASH_CLUSTER_LS, String(sel.value));
+  loadDatabases();
   loadHosts();
   loadMetrics();
-  loadClusters();
+  loadDiskUsage();
+  loadOplogWindow();
+  loadStorageStats();
+});
+
+// ─── Init ───────────────────────────────────────────────────────────
+checkHealth();
+(async function initDashboard() {
+  await loadClusters();
+  await Promise.all([loadDatabases(), loadHosts()]);
+  loadMetrics();
+  loadDiskUsage();
+  loadOplogWindow();
+  loadStorageStats();
+})();
+
+setInterval(async () => {
+  checkHealth();
+  await loadClusters();
+  await Promise.all([loadDatabases(), loadHosts()]);
+  loadMetrics();
   loadDiskUsage();
   loadOplogWindow();
 }, 60_000);

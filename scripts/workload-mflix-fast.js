@@ -1,5 +1,6 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const { MongoClient } = require("mongodb");
+const { resolveWorkloadMongoUri } = require("./workload-uri");
 
 /**
  * Fast, index-backed workload against sample_mflix.
@@ -23,9 +24,9 @@ const MIN_SLEEP_MS = parseInt(process.env.MIN_SLEEP_MS || "80", 10);
 const MAX_SLEEP_MS = parseInt(process.env.MAX_SLEEP_MS || "350", 10);
 const MAX_TIME_MS = parseInt(process.env.MAX_TIME_MS || "5000", 10);
 
-const baseUri = process.env.MONGO_URI;
+const baseUri = resolveWorkloadMongoUri();
 if (!baseUri) {
-  console.error("MONGO_URI is not set in .env");
+  console.error("Set MONGO_URI or WORKLOAD_MONGO_URI in .env");
   process.exit(1);
 }
 const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);

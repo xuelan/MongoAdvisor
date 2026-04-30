@@ -15,14 +15,42 @@ function matchExcludeSystemAppName(base = {}) {
   return { $and: [base, exclude] };
 }
 
-function buildFilter(query, { includeHost = true } = {}) {
-  const filter = {};
-  if (query.clusterId) filter.clusterId = new ObjectId(query.clusterId);
-  if (query.since) filter.timestamp = { $gte: new Date(query.since) };
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Exact `namespace` query wins; otherwise `database` matches db.collection-style namespaces. */
+function applyNamespaceOrDatabaseFilter(filter, query) {
   if (query.namespace) {
     const ns = Array.isArray(query.namespace) ? query.namespace : [query.namespace];
     filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
+    return;
   }
+  if (query.database == null || query.database === "") return;
+  const dbs = (Array.isArray(query.database) ? query.database : [query.database])
+    .map((d) => String(d).trim())
+    .filter(Boolean);
+  if (dbs.length === 0) return;
+  if (dbs.length === 1) {
+    filter.namespace = new RegExp(`^${escapeRegex(dbs[0])}\\.`);
+  } else {
+    filter.namespace = { $in: dbs.map((db) => new RegExp(`^${escapeRegex(db)}\\.`)) };
+  }
+}
+
+function buildFilter(query, { includeHost = true } = {}) {
+  const filter = {};
+  if (query.clusterId != null && query.clusterId !== "") {
+    const sid = String(query.clusterId);
+    if (!ObjectId.isValid(sid)) {
+      const err = new Error("Invalid clusterId");
+      err.statusCode = 400;
+      throw err;
+    }
+    filter.clusterId = new ObjectId(sid);
+  }
+  if (query.since) filter.timestamp = { $gte: new Date(query.since) };
+  applyNamespaceOrDatabaseFilter(filter, query);
   if (includeHost && query.host) {
     const hosts = Array.isArray(query.host) ? query.host : [query.host];
     filter.host = hosts.length === 1 ? hosts[0] : { $in: hosts };
@@ -30,12 +58,18 @@ function buildFilter(query, { includeHost = true } = {}) {
   return filter;
 }
 
-// GET /api/metrics/namespaces -- distinct namespaces for filter dropdown
-router.get("/namespaces", async (_req, res, next) => {
+// GET /api/metrics/namespaces -- distinct namespaces for filter dropdown (?clusterId=)
+router.get("/namespaces", async (req, res, next) => {
   try {
+    const match = {};
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      match.clusterId = new ObjectId(sid);
+    }
     const namespaces = await getDb()
       .collection("query_stats")
-      .distinct("namespace");
+      .distinct("namespace", Object.keys(match).length ? match : undefined);
     res.json(
       namespaces
         .filter(Boolean)
@@ -47,10 +81,42 @@ router.get("/namespaces", async (_req, res, next) => {
   }
 });
 
-// GET /api/metrics/hosts -- all hosts from topologies
-router.get("/hosts", async (_req, res, next) => {
+// GET /api/metrics/databases -- distinct database names for filter dropdown (?clusterId=)
+router.get("/databases", async (req, res, next) => {
   try {
-    const topos = await getDb().collection("topologies").find().toArray();
+    const match = {};
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      match.clusterId = new ObjectId(sid);
+    }
+    const namespaces = await getDb()
+      .collection("query_stats")
+      .distinct("namespace", Object.keys(match).length ? match : undefined);
+    const databases = [
+      ...new Set(
+        namespaces
+          .filter(Boolean)
+          .map((ns) => ns.split(".")[0])
+          .filter((db) => db && !isHiddenTopLevelDb(db)),
+      ),
+    ].sort();
+    res.json(databases);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/metrics/hosts -- hosts from topologies (?clusterId= for one cluster)
+router.get("/hosts", async (req, res, next) => {
+  try {
+    const q = {};
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      q.clusterId = new ObjectId(sid);
+    }
+    const topos = await getDb().collection("topologies").find(q).toArray();
     const hosts = new Set();
     for (const t of topos) {
       for (const h of t.hosts || []) hosts.add(h);
@@ -505,18 +571,20 @@ router.get("/slow-query-sample", async (req, res, next) => {
   }
 });
 
-// GET /api/metrics/unused-indexes
+// GET /api/metrics/unused-indexes (?clusterId=&host=)
 router.get("/unused-indexes", async (req, res, next) => {
   try {
     const filter = { type: "unused" };
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      filter.clusterId = new ObjectId(sid);
+    }
     if (req.query.host) {
       const hosts = Array.isArray(req.query.host) ? req.query.host : [req.query.host];
       filter.host = hosts.length === 1 ? hosts[0] : { $in: hosts };
     }
-    if (req.query.namespace) {
-      const ns = Array.isArray(req.query.namespace) ? req.query.namespace : [req.query.namespace];
-      filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
-    }
+    applyNamespaceOrDatabaseFilter(filter, req.query);
     const docs = await getDb()
       .collection("index_stats")
       .find(filter)
@@ -528,18 +596,20 @@ router.get("/unused-indexes", async (req, res, next) => {
   }
 });
 
-// GET /api/metrics/redundant-indexes
+// GET /api/metrics/redundant-indexes (?clusterId=&host=)
 router.get("/redundant-indexes", async (req, res, next) => {
   try {
     const filter = { type: "redundant" };
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      filter.clusterId = new ObjectId(sid);
+    }
     if (req.query.host) {
       const hosts = Array.isArray(req.query.host) ? req.query.host : [req.query.host];
       filter.host = hosts.length === 1 ? hosts[0] : { $in: hosts };
     }
-    if (req.query.namespace) {
-      const ns = Array.isArray(req.query.namespace) ? req.query.namespace : [req.query.namespace];
-      filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
-    }
+    applyNamespaceOrDatabaseFilter(filter, req.query);
     const docs = await getDb()
       .collection("index_stats")
       .find(filter)
@@ -556,7 +626,11 @@ router.get("/monitor-logs", async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit || "200", 10) || 200, 1), 1000);
     const filter = {};
-    if (req.query.clusterId) filter.clusterId = new ObjectId(req.query.clusterId);
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      filter.clusterId = new ObjectId(sid);
+    }
     if (req.query.since) filter.timestamp = { $gte: new Date(req.query.since) };
     if (req.query.action) filter.action = String(req.query.action);
     if (req.query.outcome) filter.outcome = String(req.query.outcome);
@@ -572,14 +646,16 @@ router.get("/monitor-logs", async (req, res, next) => {
   }
 });
 
-// GET /api/metrics/storage — collection-level storage and fragmentation
+// GET /api/metrics/storage — collection-level storage and fragmentation (?clusterId=&namespace=&database=)
 router.get("/storage", async (req, res, next) => {
   try {
     const filter = {};
-    if (req.query.namespace) {
-      const ns = Array.isArray(req.query.namespace) ? req.query.namespace : [req.query.namespace];
-      filter.namespace = ns.length === 1 ? ns[0] : { $in: ns };
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      filter.clusterId = new ObjectId(sid);
     }
+    applyNamespaceOrDatabaseFilter(filter, req.query);
     const docs = await getDb()
       .collection("storage_stats")
       .find(filter)
@@ -591,13 +667,19 @@ router.get("/storage", async (req, res, next) => {
   }
 });
 
-// GET /api/metrics/disk-usage — latest disk usage per cluster
-router.get("/disk-usage", async (_req, res, next) => {
+// GET /api/metrics/disk-usage — latest disk usage per cluster (?clusterId= for one cluster)
+router.get("/disk-usage", async (req, res, next) => {
   try {
+    const initialMatch = { clusterId: { $exists: true, $ne: null } };
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      initialMatch.clusterId = new ObjectId(sid);
+    }
     const docs = await getDb()
       .collection("disk_usage")
       .aggregate([
-        { $match: { clusterId: { $exists: true, $ne: null } } },
+        { $match: initialMatch },
         { $sort: { timestamp: -1 } },
         // Normalize id so ObjectId vs string (e.g. after restore) does not split one cluster into two rows
         { $addFields: { _cid: { $toString: "$clusterId" } } },
@@ -629,13 +711,19 @@ router.get("/disk-usage", async (_req, res, next) => {
   }
 });
 
-// GET /api/metrics/oplog-window — latest oplog window per cluster
-router.get("/oplog-window", async (_req, res, next) => {
+// GET /api/metrics/oplog-window — latest oplog window per cluster (?clusterId= for one cluster)
+router.get("/oplog-window", async (req, res, next) => {
   try {
+    const initialMatch = { clusterId: { $exists: true, $ne: null } };
+    if (req.query.clusterId != null && req.query.clusterId !== "") {
+      const sid = String(req.query.clusterId);
+      if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
+      initialMatch.clusterId = new ObjectId(sid);
+    }
     const docs = await getDb()
       .collection("oplog_window")
       .aggregate([
-        { $match: { clusterId: { $exists: true, $ne: null } } },
+        { $match: initialMatch },
         { $sort: { timestamp: -1 } },
         { $addFields: { _cid: { $toString: "$clusterId" } } },
         { $group: {

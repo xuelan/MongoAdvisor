@@ -43,6 +43,28 @@ const PRESETS = {
       return payload;
     },
   },
+  /**
+   * Broad access for **local** sample-data scripts only (`workload*.js`, `airbnb-expand-listings-big.js`).
+   * Needed for `$out` / writes (e.g. `listingsAndReviews_big`). Do **not** use this user for MongoAdvisor
+   * monitored-cluster registration in production — use `metrics` instead.
+   */
+  workload: {
+    description:
+      "Sample workload + expand scripts (readWriteAnyDatabase — dev/demo; not for collector registration)",
+    buildPayload: (projectId, username, password, clusterName) => {
+      const payload = {
+        groupId: projectId,
+        username,
+        password,
+        databaseName: "admin",
+        roles: [{ roleName: "readWriteAnyDatabase", databaseName: "admin" }],
+      };
+      if (clusterName) {
+        payload.scopes = [{ name: clusterName, type: "CLUSTER" }];
+      }
+      return payload;
+    },
+  },
 };
 
 const PRESET_NAMES = Object.keys(PRESETS);

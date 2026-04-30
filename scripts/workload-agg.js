@@ -1,12 +1,13 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const { MongoClient } = require("mongodb");
+const { resolveWorkloadMongoUri } = require("./workload-uri");
 
 const APP_NAME = "workload-a";
 const COMMENT = "airbnb_listings_host_lookup_group";
 
-const baseUri = process.env.MONGO_URI;
+const baseUri = resolveWorkloadMongoUri();
 if (!baseUri) {
-  console.error("MONGO_URI is not set in .env");
+  console.error("Set MONGO_URI or WORKLOAD_MONGO_URI in .env");
   process.exit(1);
 }
 const readPref = process.env.READ_PREF || pick(["primary", "secondary"]);

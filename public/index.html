@@ -63,6 +63,12 @@
       <h2>Filters</h2>
       <div class="filter-row">
         <div class="filter-group">
+          <label for="dashboardClusterSelect">Metrics cluster</label>
+          <select id="dashboardClusterSelect" class="dashboard-cluster-select" aria-label="Metrics cluster" disabled>
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div class="filter-group">
           <label>Time range</label>
           <div class="time-range-btns" id="timeRangeGroup">
             <button class="btn-filter" data-val="300000">5 min</button>
@@ -83,12 +89,12 @@
         <div class="ns-checkboxes" id="hostFilter"></div>
       </div>
       <div class="filter-group" style="margin-top: 0.75rem;">
-        <label>Namespaces</label>
+        <label>Databases</label>
         <div class="ns-filter-actions">
-          <button class="btn-filter" onclick="nsSelectAll()">Select all</button>
-          <button class="btn-filter" onclick="nsSelectNone()">Select none</button>
+          <button class="btn-filter" onclick="dbSelectAll()">Select all</button>
+          <button class="btn-filter" onclick="dbSelectNone()">Select none</button>
         </div>
-        <div class="ns-checkboxes" id="nsFilter"></div>
+        <div class="ns-checkboxes" id="dbFilter"></div>
       </div>
     </section>
 
