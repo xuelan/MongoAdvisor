@@ -106,7 +106,6 @@ main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 .cluster-edit-select:focus { outline: none; border-color: #00ed64; }
 .cluster-edit-panel .cluster-edit-form { margin-bottom: 0; }
 .cluster-name { font-weight: 500; color: #fff; }
-.cluster-meta { font-size: 0.85rem; color: #8899a6; }
 .empty { color: #5c6d7e; font-style: italic; padding: 1rem 0; }
 
 .btn { background: #00ed64; color: #0f1923; border: none; padding: 0.45rem 1.1rem; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.85rem; }
@@ -119,12 +118,13 @@ main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 .atlas-link { font-size: 0.8rem; color: #00ed64; text-decoration: none; margin-left: 0.5rem; padding: 0.15rem 0.5rem; border: 1px solid #00ed64; border-radius: 999px; }
 .atlas-link:hover { background: rgba(0,237,100,0.15); }
 
-.topology { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: #0f1923; border-radius: 6px; font-size: 0.8rem; }
-.topology .topo-label { color: #5c6d7e; margin-bottom: 0.25rem; }
-.topo-members { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.topology { margin-top: 0.5rem; padding: 0.5rem 0.75rem; background: #0f1923; border-radius: 6px; font-size: 0.8rem; color: #5c6d7e; }
+.topo-members { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
 .topo-member { padding: 0.15rem 0.5rem; background: #1e3a4f; border-radius: 4px; color: #8899a6; font-family: monospace; font-size: 0.75rem; }
 .topo-member.primary { background: rgba(0,237,100,0.15); color: #00ed64; }
-.btn-discover { padding: 0.2rem 0.6rem; font-size: 0.75rem; background: transparent; color: #5c6d7e; border: 1px solid #1e3a4f; border-radius: 4px; cursor: pointer; margin-left: 0.5rem; }
+.topo-alias-note { font-size: 0.7rem; color: #e5a84b; padding: 0.1rem 0.4rem; background: rgba(229,168,75,0.1); border-radius: 4px; cursor: help; }
+.topo-error-note { font-size: 0.7rem; color: #ff6b6b; padding: 0.1rem 0.4rem; background: rgba(255,107,107,0.12); border-radius: 4px; cursor: help; }
+.btn-discover { padding: 0.2rem 0.6rem; font-size: 0.75rem; background: transparent; color: #5c6d7e; border: 1px solid #1e3a4f; border-radius: 4px; cursor: pointer; }
 .btn-discover:hover { border-color: #00ed64; color: #00ed64; }
 
 form.add-cluster { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem; }

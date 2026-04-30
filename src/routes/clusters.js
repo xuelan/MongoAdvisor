@@ -71,7 +71,7 @@ router.get("/:id", async (req, res, next) => {
 });
 
 /**
- * Partial update (name, region, uri, Atlas fields, isPolling). Omitted keys are unchanged.
+ * Partial update (name, uri, Atlas fields, isPolling). Omitted keys are unchanged.
  * Empty `atlasPrivateKey` clears the stored private key. Connection pools reload when `uri` changes.
  * `isPolling: false` pauses scheduled collection for that cluster (no server restart).
  */
@@ -97,10 +97,6 @@ router.patch("/:id", async (req, res, next) => {
       if (!n) return res.status(400).json({ error: "name cannot be empty" });
       $set.name = n;
     }
-    if (Object.prototype.hasOwnProperty.call(body, "region")) {
-      $set.region =
-        body.region != null && String(body.region).trim() ? String(body.region).trim() : "unknown";
-    }
     if (Object.prototype.hasOwnProperty.call(body, "uri")) {
       const u = String(body.uri || "").trim();
       if (!u) return res.status(400).json({ error: "uri cannot be empty when provided" });
@@ -124,6 +120,12 @@ router.patch("/:id", async (req, res, next) => {
     await getDb().collection(COLLECTION).updateOne({ _id: oid }, { $set });
     if (Object.prototype.hasOwnProperty.call($set, "uri")) {
       removePoolsForCluster(oid);
+      // Re-discover immediately so topology reflects the new URI (SRV hostnames, primary)
+      const { discoverOne } = require("../discovery");
+      const freshCluster = await getDb().collection(COLLECTION).findOne({ _id: oid });
+      discoverOne(freshCluster).catch((err) =>
+        console.error(`[discovery] post-URI-update rediscover for "${freshCluster?.name}" failed:`, err.message),
+      );
     }
 
     const updated = await getDb().collection(COLLECTION).findOne({ _id: oid });
@@ -248,7 +250,7 @@ router.post("/:id/atlas-database-users", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { name, uri, provider, region, atlasProjectId, atlasPublicKey, atlasPrivateKey } = req.body;
+    const { name, uri, provider, atlasProjectId, atlasPublicKey, atlasPrivateKey } = req.body;
     if (!name || !uri) {
       return res.status(400).json({ error: "name and uri are required" });
     }
@@ -256,7 +258,6 @@ router.post("/", async (req, res, next) => {
       name,
       uri: encryptField(uri),
       provider: provider || "unknown",
-      region: region || "unknown",
       atlasProjectId: atlasProjectId || null,
       atlasPublicKey: atlasPublicKey || null,
       atlasPrivateKey: encryptField(atlasPrivateKey),

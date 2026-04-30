@@ -129,13 +129,42 @@ async function loadTopologies() {
 function renderTopology(clusterId) {
   const t = topologyMap[clusterId];
   if (!t || !t.hosts.length)
-    return '<div class="topology"><span class="topo-label">No topology discovered yet</span></div>';
+    return '<div class="topology">No topology discovered yet</div>';
+
+  const clusterObj = clusters.find((c) => String(c._id) === String(clusterId));
+  let uriPrefix = t.uriPrefix || null;
+  if (!uriPrefix && clusterObj && clusterObj.uri) {
+    try {
+      const sanitized = clusterObj.uri.replace(/\/\/[^@]+@/, "//x@");
+      uriPrefix = new URL(sanitized).hostname.split(".")[0];
+    } catch { /* ignore */ }
+  }
+
+  const hostMismatch = uriPrefix
+    && t.hosts.length > 0
+    && !t.hosts.some((h) => h.startsWith(uriPrefix + "-") || h.startsWith(uriPrefix + ":"));
+
   const members = t.hosts
-    .map((h) => `<span class="topo-member${h === t.primary ? " primary" : ""}">${h}${h === t.primary ? " (P)" : ""}</span>`)
+    .map((h) => {
+      const isPrimary = h === t.primary;
+      const isUnknownPrimary = !t.primary && t.helloOk === false;
+      const cls = isPrimary ? " primary" : "";
+      const label = isPrimary ? `${shortHost(h)} (P)` : shortHost(h);
+      return `<span class="topo-member${cls}" title="${h}">${label}</span>`;
+    })
     .join("");
+
+  const notes = [];
+  if (hostMismatch) {
+    notes.push(`<span class="topo-alias-note" title="Stored RS member names start with '${t.hosts[0].split(".")[0]}' but the cluster connects via '${uriPrefix}' DNS alias. Showing aliased hostnames.">⚠ aliased hostnames</span>`);
+  }
+  if (t.helloOk === false) {
+    const errMsg = t.helloError ? String(t.helloError).replace(/"/g, "&quot;") : "Connection error";
+    notes.push(`<span class="topo-error-note" title="${errMsg}">⚠ auth failed — verify connection string</span>`);
+  }
+
   return `<div class="topology">
-    <div class="topo-label">Replica set: ${t.setName || "unknown"} <button class="btn-discover" onclick="rediscover('${clusterId}')">Refresh</button></div>
-    <div class="topo-members">${members}</div>
+    <div class="topo-members">${members}${notes.join("")}<button type="button" class="btn-discover" onclick="rediscover('${clusterId}')">Refresh</button></div>
   </div>`;
 }
 
@@ -215,13 +244,13 @@ function shortHost(h) {
   return h.replace(/\.mongodb\.net:\d+$/, "").replace(/\.ljwx2$/, "");
 }
 
-async function loadHosts() {
+async function loadHosts({ resetAll = false } = {}) {
   try {
     const res = await fetch(`${API}/api/metrics/hosts${dashboardClusterQuery()}`);
     allHosts = await res.json();
     const container = document.getElementById("hostFilter");
     const prev = getSelectedHosts();
-    const isFirst = container.children.length === 0;
+    const isFirst = resetAll || container.children.length === 0;
 
     container.innerHTML = allHosts.map((h) => {
       const checked = isFirst ? true : prev.includes(h);
@@ -236,14 +265,14 @@ async function loadHosts() {
   } catch { /* ignore */ }
 }
 
-async function loadDatabases() {
+async function loadDatabases({ resetAll = false } = {}) {
   try {
     const res = await fetch(`${API}/api/metrics/databases${dashboardClusterQuery()}`);
     allDatabases = await res.json();
     visibleDatabases = allDatabases.filter((db) => !isHiddenDbName(db));
     const container = document.getElementById("dbFilter");
     const prev = getSelectedDatabases();
-    const isFirst = container.children.length === 0;
+    const isFirst = resetAll || container.children.length === 0;
 
     container.innerHTML = visibleDatabases.map((db) => {
       const checked = isFirst ? true : prev.includes(db);
@@ -1144,7 +1173,6 @@ async function loadClusters() {
         <div class="cluster-header">
           <div>
             <span class="cluster-name">${displayName}</span>
-            <span class="cluster-meta"> — ${escAttr(c.region || "")}</span>
             ${pollingOff ? '<span class="cluster-polling-paused" title="Scheduled metrics collection is paused for this cluster">polling paused</span>' : ""}
             ${c.atlasProjectId ? `<a class="atlas-link" href="https://cloud.mongodb.com/v2/${c.atlasProjectId}#/clusters/detail/${c.name}" target="_blank">Atlas Console</a>` : ""}
           </div>
@@ -1289,8 +1317,20 @@ document.getElementById("clusterEditForm")?.addEventListener("submit", async (e)
     form.querySelector('[name="uri"]').value = "";
     form.querySelector('[name="atlasPrivateKey"]').value = "";
     document.getElementById("clusterEditPanel")?.setAttribute("hidden", "");
-    showClusterFormFeedback("Cluster updated.", false);
+    const hadUriChange = !!uri;
+    showClusterFormFeedback(
+      hadUriChange ? "Cluster updated — refreshing topology…" : "Cluster updated.",
+      false,
+    );
+    // If URI changed, give the server a moment to finish re-discovering the topology
+    if (hadUriChange) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
     loadClusters();
+    if (hadUriChange) {
+      loadHosts({ resetAll: true });
+      loadDatabases({ resetAll: true });
+    }
   } catch (err) {
     showClusterFormFeedback(err.message || "Network error", true);
   }
@@ -1956,8 +1996,8 @@ document.getElementById("explainRunBtn")?.addEventListener("click", runExplainOn
 document.getElementById("dashboardClusterSelect")?.addEventListener("change", () => {
   const sel = document.getElementById("dashboardClusterSelect");
   if (sel?.value) localStorage.setItem(DASH_CLUSTER_LS, String(sel.value));
-  loadDatabases();
-  loadHosts();
+  loadDatabases({ resetAll: true });
+  loadHosts({ resetAll: true });
   loadMetrics();
   loadDiskUsage();
   loadOplogWindow();

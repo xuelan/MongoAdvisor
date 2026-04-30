@@ -364,7 +364,7 @@ Charts that use query stats or slow queries honor:
 | `GET`    | `/api/clusters`                          | List clusters (secrets masked)                                                                            |
 | `POST`   | `/api/clusters`                          | Register a cluster                                                                                        |
 | `GET`    | `/api/clusters/:id`                      | One cluster                                                                                               |
-| `PATCH`  | `/api/clusters/:id`                      | Update cluster (`name`, `region`, `uri`, Atlas fields; omit `uri` / `atlasPrivateKey` to leave unchanged) |
+| `PATCH`  | `/api/clusters/:id`                      | Update cluster (`name`, `uri`, Atlas fields, `isPolling`; omit `uri` / `atlasPrivateKey` to leave unchanged) |
 | `DELETE` | `/api/clusters/:id`                      | Remove cluster                                                                                            |
 | `POST`   | `/api/clusters/:id/atlas-database-users` | Create Atlas SCRAM user using stored cluster Atlas API keys                                               |
 | `GET`    | `/api/atlas/database-users/presets`      | Preset ids for Atlas SCRAM user creation                                                                  |

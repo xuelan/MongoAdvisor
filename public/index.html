@@ -24,7 +24,6 @@
       <h2>Monitored Clusters</h2>
       <form class="add-cluster" id="addForm">
         <input name="name" placeholder="Cluster name" required>
-        <input name="region" placeholder="Region (optional)">
         <input name="uri" class="full" placeholder="Connection string (mongodb+srv://…)" required>
         <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
         <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
@@ -43,7 +42,6 @@
         </select>
         <form class="add-cluster cluster-edit-form" id="clusterEditForm">
           <input name="name" placeholder="Cluster name" required>
-          <input name="region" placeholder="Region (optional)">
           <input name="uri" class="full" placeholder="New connection string (optional)" autocomplete="off">
           <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
           <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
@@ -163,7 +161,7 @@
         <h2>Slowest Query Impact Bubble <span class="subtitle">top 20 AppName + Comment — x = exec count, y = avg latency, size = total time</span></h2>
         <div class="info-btn-wrap">
           <button class="info-btn visible">i</button>
-          <div class="info-tooltip">Source is Query Profiler of Atlas. Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a></div>
+          <div class="info-tooltip">Source is Query Profiler of Atlas (mongod log–based, not the Database Profiler). Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a></div>
         </div>
       </div>
       <div class="bubble-wrap">
@@ -177,7 +175,7 @@
           <h2>IO Heatmap by AppName<br><span class="subtitle">Top 20 — size = count, color = bytes read</span></h2>
           <div class="info-btn-wrap">
             <button class="info-btn visible">i</button>
-            <div class="info-tooltip">Source is Query Profiler of Atlas. Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a><br><br><code>storage.data.bytesRead</code> — Number of bytes read by the operation from the disk to the cache. <a href="https://www.mongodb.com/docs/manual/reference/database-profiler/#mongodb-data-system.profile.storage.data.bytesRead" target="_blank" rel="noopener">More info</a></div>
+            <div class="info-tooltip">Source is Query Profiler of Atlas (mongod log–based). Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a><br><br><code>storage.data.bytesRead</code> — Bytes read from disk to cache (as reported on slow-operation log lines). <a href="https://www.mongodb.com/docs/manual/reference/log-messages/" target="_blank" rel="noopener">MongoDB log messages</a></div>
           </div>
         </div>
         <div class="treemap-legend">
@@ -194,7 +192,7 @@
           <h2>CPU Heatmap by AppName<br><span class="subtitle">Top 20 — size = count, color = cpuNanos</span></h2>
           <div class="info-btn-wrap">
             <button class="info-btn visible">i</button>
-            <div class="info-tooltip">Source is Query Profiler of Atlas. Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a><br><br><code>cpuNanos</code> — The total CPU time spent by a query operation in nanoseconds. This field is only available on Linux systems. <a href="https://www.mongodb.com/docs/manual/reference/database-profiler/#mongodb-data-system.profile.cpuNanos" target="_blank" rel="noopener">More info</a></div>
+            <div class="info-tooltip">Source is Query Profiler of Atlas (mongod log–based). Atlas manages the threshold for slow operations for each mongod host based on average operation execution time on that host. <a href="https://www.mongodb.com/docs/atlas/tutorial/query-profiler/#std-label-query-profiler" target="_blank" rel="noopener">More info</a><br><br><code>cpuNanos</code> — CPU time for the operation in nanoseconds when present on slow-operation log lines (Linux). <a href="https://www.mongodb.com/docs/manual/reference/log-messages/" target="_blank" rel="noopener">MongoDB log messages</a></div>
           </div>
         </div>
         <div class="treemap-legend">

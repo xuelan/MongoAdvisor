@@ -21,7 +21,10 @@ const POLL_INTERVAL_LOGS = 5 * 60 * 1000;
 const POLL_INTERVAL_INDEXES = 10 * 60 * 1000;
 const STORAGE_HOUR = 3; // run storage scan daily at 3 AM local time
 
-const slowQuerySince = new Map();
+/** Rolling lookback for Performance Advisor slowQueryLogs. Fixed window avoids the shrinking-window bug. */
+const SLOW_QUERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+/** Extra overlap so boundary events (clock skew, Atlas log delay) are not missed. */
+const SLOW_QUERY_OVERLAP_MS = 6 * 60 * 1000;
 
 // ─── $queryStats collector ──────────────────────────────────────────
 
@@ -382,59 +385,197 @@ function extractOccurredAtFromRawLine(line) {
   return null;
 }
 
+// ─── Atlas helpers for slow-query collection ────────────────────────
+
+/** Extract hostname prefix from an SRV connection URI (e.g. "workload" from "…@workload.host/"). */
+function clusterHostPrefixFromUri(uri) {
+  if (!uri || typeof uri !== "string") return null;
+  try {
+    const sanitized = uri.replace(/\/\/[^@]+@/, "//x@");
+    return new URL(sanitized).hostname.split(".")[0] || null;
+  } catch { return null; }
+}
+
+/** Fetch Atlas process list for a project (used to resolve the correct process IDs for PA API). */
+async function atlasFetchGroupProcesses(projectId, publicKey, privateKey) {
+  const url = new URL(`https://cloud.mongodb.com/api/atlas/v2/groups/${projectId}/processes`);
+  url.searchParams.set("itemsPerPage", "500");
+  url.searchParams.set("pageNum", "1");
+  const resp = await digestFetch(url.toString(), publicKey, privateKey);
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(`listGroupProcesses ${resp.status}: ${t.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return Array.isArray(data.results) ? data.results : [];
+}
+
+/**
+ * Determine which Atlas process IDs to query for slow logs.
+ * Priority:
+ * 1. Atlas process list filtered by URI hostname prefix (most reliable — avoids multi-cluster alias confusion).
+ * 2. Atlas process list filtered by replica set name.
+ * 3. topology.hosts as last resort.
+ */
+function buildSlowQueryProcessTargets(topology, atlasProcesses, clusterUri) {
+  const rs = topology.setName;
+  const prefix = clusterHostPrefixFromUri(clusterUri);
+
+  if (prefix && atlasProcesses.length) {
+    const byPrefix = atlasProcesses
+      .filter((p) => {
+        if (!p || typeof p.id !== "string") return false;
+        if (String(p.typeName || p.userTypeName || "").toUpperCase().includes("MONGOS")) return false;
+        return p.id.startsWith(prefix + "-") || (p.hostname || "").startsWith(prefix + "-");
+      })
+      .map((p) => p.id);
+    if (byPrefix.length) {
+      const primary = topology.primary;
+      return (primary && byPrefix.includes(primary))
+        ? [primary, ...byPrefix.filter((id) => id !== primary)]
+        : byPrefix;
+    }
+  }
+
+  if (rs && atlasProcesses.length) {
+    const byRs = atlasProcesses
+      .filter((p) => {
+        if (!p || typeof p.id !== "string") return false;
+        if (String(p.typeName || p.userTypeName || "").toUpperCase().includes("MONGOS")) return false;
+        return p.replicaSetName === rs;
+      })
+      .map((p) => p.id);
+    if (byRs.length) {
+      const primary = topology.primary;
+      return (primary && byRs.includes(primary))
+        ? [primary, ...byRs.filter((id) => id !== primary)]
+        : byRs;
+    }
+  }
+
+  return [topology.primary, ...topology.hosts.filter((h) => h !== topology.primary)].filter(Boolean);
+}
+
+/** Normalize slowQueryLogs response — Atlas wraps the array differently across API versions. */
+function extractSlowQueriesArray(data) {
+  if (!data || typeof data !== "object") return [];
+  if (Array.isArray(data.slowQueries)) return data.slowQueries;
+  const r = data.results;
+  if (r && typeof r === "object" && Array.isArray(r.slowQueries)) return r.slowQueries;
+  if (Array.isArray(data.lines)) return data.lines;
+  if (Array.isArray(r) && r.length && r[0] && typeof r[0] === "object" && ("line" in r[0] || "raw" in r[0])) return r;
+  return [];
+}
+
+/** Extract the raw log line string from a slowQueries entry (field name varies). */
+function slowQueryLineFromEntry(sq) {
+  if (sq == null) return "";
+  if (typeof sq === "string") return sq;
+  if (typeof sq !== "object") return "";
+  for (const k of ["line", "raw", "log", "message", "logLine", "entry", "text"]) {
+    const v = sq[k];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return "";
+}
+
 async function collectSlowQueries(cluster) {
   if (!cluster.atlasProjectId || !cluster.atlasPublicKey || !cluster.atlasPrivateKey) {
-    return 0;
+    return { count: 0, skipReason: "no_atlas_keys" };
   }
 
   const publicKey = cluster.atlasPublicKey;
   const privateKey = decryptField(cluster.atlasPrivateKey);
   const projectId = cluster.atlasProjectId;
+  const clusterUri = decryptField(cluster.uri);
 
   const topology = await getDb()
     .collection("topologies")
     .findOne({ clusterId: cluster._id });
-  if (!topology || !topology.hosts.length) return 0;
+  if (!topology || !topology.hosts.length) {
+    return { count: 0, skipReason: "no_topology" };
+  }
 
-  const allHosts = [topology.primary, ...topology.hosts.filter((h) => h !== topology.primary)].filter(Boolean);
+  const helloTargets = [topology.primary, ...topology.hosts.filter((h) => h !== topology.primary)].filter(Boolean);
+  let processTargets = helloTargets;
+  try {
+    const atlasProcesses = await atlasFetchGroupProcesses(projectId, publicKey, privateKey);
+    const merged = buildSlowQueryProcessTargets(topology, atlasProcesses, clusterUri);
+    processTargets = merged;
+    const helloSet = new Set(helloTargets);
+    const dropped = helloTargets.filter((id) => !merged.includes(id));
+    const added = merged.filter((id) => !helloSet.has(id));
+    if (dropped.length || added.length) {
+      console.log(
+        `[slowQueries] ${cluster.name}: process IDs differ from hello.hosts (uriPrefix="${clusterHostPrefixFromUri(clusterUri)}") — using=[${merged.join("; ")}] dropped=[${dropped.join("; ")}] added=[${added.join("; ")}]`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[slowQueries] ${cluster.name}: listGroupProcesses failed (${err.message}) — using topology hosts`);
+  }
 
-  const clusterId = cluster._id.toString();
-  const since = slowQuerySince.get(clusterId) || Date.now() - 24 * 60 * 60 * 1000;
-
+  const nowMs = Date.now();
+  const sinceMs = nowMs - SLOW_QUERY_LOOKBACK_MS - SLOW_QUERY_OVERLAP_MS;
+  const durationMs = nowMs - sinceMs;
   const now = new Date();
   const allDocs = [];
 
-  for (const host of allHosts) {
+  for (const host of processTargets) {
     try {
       const url = new URL(
-        `https://cloud.mongodb.com/api/atlas/v2/groups/${projectId}/processes/${host}/performanceAdvisor/slowQueryLogs`,
+        `https://cloud.mongodb.com/api/atlas/v2/groups/${projectId}/processes/${encodeURIComponent(host)}/performanceAdvisor/slowQueryLogs`,
       );
-      const duration = Date.now() - since;
-      url.searchParams.set("since", since.toString());
-      url.searchParams.set("duration", duration.toString());
+      url.searchParams.set("since", String(sinceMs));
+      url.searchParams.set("duration", String(durationMs));
+      url.searchParams.set("nLogs", "2000");
+
+      console.log(
+        `[slowQueries] ${cluster.name} host=${host} sinceISO=${new Date(sinceMs).toISOString()} durationH=${(durationMs / 3600000).toFixed(2)}`,
+      );
 
       const resp = await digestFetch(url.toString(), publicKey, privateKey);
       if (!resp.ok) {
         const text = await resp.text();
-        console.error(`[slowQueries] ${cluster.name} host=${host}: Atlas API ${resp.status}: ${text.slice(0, 120)}`);
+        console.error(`[slowQueries] ${cluster.name} host=${host}: Atlas API ${resp.status}: ${text.slice(0, 200)}`);
         continue;
       }
 
       const data = await resp.json();
-      const slowQueries = data.slowQueries || [];
+      const slowQueries = extractSlowQueriesArray(data);
+      if (!slowQueries.length && data && typeof data === "object" && !Object.keys(data).includes("slowQueries")) {
+        console.log(`[slowQueries] ${cluster.name} host=${host}: unexpected response keys=${Object.keys(data).join(",")}`);
+      }
 
+      let rawLines = 0;
+      let filteredLines = 0;
+      const filterReasons = {};
       for (const sq of slowQueries) {
-        const line = sq.line || "";
+        rawLines += 1;
+        const line = slowQueryLineFromEntry(sq);
+        if (!line) {
+          filteredLines += 1;
+          filterReasons["(no line field)"] = (filterReasons["(no line field)"] || 0) + 1;
+          continue;
+        }
         const parsed = parseLogLine(line);
-        if (isIgnoredApp(parsed.appName)) continue;
+        if (isIgnoredApp(parsed.appName)) {
+          filteredLines += 1;
+          const k = `app:${parsed.appName || "(null)"}`;
+          filterReasons[k] = (filterReasons[k] || 0) + 1;
+          continue;
+        }
         const ns = sq.namespace || parsed.namespace || null;
-        if (isIgnoredNs(ns)) continue;
+        if (isIgnoredNs(ns)) {
+          filteredLines += 1;
+          const k = `ns:${ns || "(null)"}`;
+          filterReasons[k] = (filterReasons[k] || 0) + 1;
+          continue;
+        }
         const occurredAt =
           parsed.occurredAt instanceof Date && !Number.isNaN(parsed.occurredAt.getTime())
             ? parsed.occurredAt
             : null;
         const millis = Number(parsed.millis) || 0;
-        // Prefer log event time (`t` in slow-query JSON); if missing/unparseable, use collect run time.
         const row = {
           clusterId: cluster._id,
           clusterName: cluster.name,
@@ -452,26 +593,27 @@ async function collectSlowQueries(cluster) {
           docsExamined: parsed.docsExamined || 0,
           keysExamined: parsed.keysExamined || 0,
           nreturned: parsed.nreturned || 0,
-          // Raw query body for the "Explain" UI (parsed command object + original log line).
           command: parsed.command || null,
           originatingCommand: parsed.originatingCommand || null,
           queryHash: parsed.queryHash || null,
           planCacheKey: parsed.planCacheKey || null,
           raw: typeof line === "string" ? line.slice(0, 20000) : null,
         };
-        if (parsed.id != null && typeof parsed.id === "number" && Number.isFinite(parsed.id)) {
-          row.id = parsed.id;
-        }
+        if (parsed.id != null && typeof parsed.id === "number" && Number.isFinite(parsed.id)) row.id = parsed.id;
         if (parsed.truncated !== undefined) row.truncated = parsed.truncated;
         allDocs.push(row);
       }
+      const ingestedCount = rawLines - filteredLines;
+      const reasonStr = Object.keys(filterReasons).length
+        ? ` filterDetail=${JSON.stringify(filterReasons)}`
+        : "";
+      console.log(`[slowQueries] ${cluster.name} host=${host}: atlasEntries=${rawLines} ingested=${ingestedCount} filtered=${filteredLines}${reasonStr}`);
     } catch (err) {
       console.error(`[slowQueries] ${cluster.name} host=${host}: ${err.message}`);
     }
   }
 
-  slowQuerySince.set(clusterId, Date.now());
-  if (!allDocs.length) return 0;
+  if (!allDocs.length) return { count: 0, skipReason: "empty_or_filtered" };
   const withNumericId = [];
   const withoutNumericId = [];
   for (const doc of allDocs) {
@@ -482,7 +624,7 @@ async function collectSlowQueries(cluster) {
     }
   }
   await bulkUpsertSlowQueries(withNumericId, withoutNumericId);
-  return allDocs.length;
+  return { count: allDocs.length };
 }
 
 function parseLogLine(line) {
@@ -553,10 +695,20 @@ async function collectSlowQueriesAll() {
       continue;
     }
     try {
-      const count = await collectSlowQueries(cluster);
-      if (count > 0) {
+      const result = await collectSlowQueries(cluster);
+      const count = typeof result === "number" ? result : (result.count ?? 0);
+      const skipReason = typeof result === "object" ? result.skipReason : null;
+
+      if (skipReason === "no_atlas_keys") {
+        console.log(`[slowQueries] ${cluster.name}: skipped — Atlas Project ID + API keys not configured`);
+      } else if (skipReason === "no_topology") {
+        console.log(`[slowQueries] ${cluster.name}: skipped — no topology yet`);
+      } else if (count > 0) {
         console.log(`[slowQueries] ${cluster.name}: ${count} entries collected`);
+      } else {
+        console.log(`[slowQueries] ${cluster.name}: poll ok, 0 rows ingested (see per-host logs above)`);
       }
+
       const hasAtlas = Boolean(
         cluster.atlasProjectId && cluster.atlasPublicKey && cluster.atlasPrivateKey,
       );
@@ -567,9 +719,9 @@ async function collectSlowQueriesAll() {
         clusterName: cluster.name,
         targetCollection: SLOW_QUERIES,
         detail: hasAtlas
-          ? `processed ${count} slow-query row(s) (upsert when numeric log id)`
-          : "Atlas API keys not configured — no fetch",
-        meta: { processedCount: count, atlasConfigured: hasAtlas },
+          ? `processed ${count} slow-query row(s)`
+          : "Atlas API keys not configured",
+        meta: { processedCount: count, atlasConfigured: hasAtlas, skipReason: skipReason || undefined },
       });
     } catch (err) {
       console.error(`[slowQueries] ${cluster.name} failed:`, err.message);
@@ -1117,79 +1269,73 @@ function msUntilNextHour(hour) {
 
 function startPolling() {
   console.log(
-    `Polling started: $queryStats+topology every ${POLL_INTERVAL_STATS / 1000}s, Atlas logs every ${POLL_INTERVAL_LOGS / 1000}s, indexStats every ${POLL_INTERVAL_INDEXES / 1000}s, storageStats daily at ${STORAGE_HOUR}:00`,
+    `Polling started: discovery→queryStats every ${POLL_INTERVAL_STATS / 1000}s, slowLogs every ${POLL_INTERVAL_LOGS / 1000}s, indexStats every ${POLL_INTERVAL_INDEXES / 1000}s, storageStats daily at ${STORAGE_HOUR}:00`,
   );
 
+  /** Discovery runs first so per-host collectors (slowQueryLogs, $queryStats, indexStats) see topologies. */
   const runStats = async () => {
-    await collectQueryStatsAll();
     await discoverAll();
+    await collectQueryStatsAll();
   };
 
-  const runLogs = async () => {
-    await collectSlowQueriesAll();
-  };
-
-  const runIndexes = async () => {
-    await collectIndexStatsAll();
-  };
-
-  const runStorage = async () => {
-    await collectStorageStatsAll();
-  };
-
-  const runDisk = async () => {
-    await collectDiskUsageAll();
-  };
-
-  const runOplog = async () => {
-    await collectOplogWindowAll();
-  };
-
-  runStats().catch((err) => console.error("[polling] stats error:", err.message));
-  runLogs().catch((err) => console.error("[polling] logs error:", err.message));
-  runIndexes().catch((err) => console.error("[polling] index error:", err.message));
-  runDisk().catch((err) => console.error("[polling] disk error:", err.message));
-  runOplog().catch((err) => console.error("[polling] oplog error:", err.message));
-
-  // Run storage on startup only if no data exists yet, otherwise wait for 3 AM
-  getDb().collection(STORAGE_STATS).countDocuments().then((count) => {
-    if (count === 0) {
-      console.log("[storageStats] No data yet — running initial collection");
-      runStorage().catch((err) => console.error("[polling] storage error:", err.message));
-    }
-  }).catch(() => {});
+  const runLogs = async () => { await collectSlowQueriesAll(); };
+  const runIndexes = async () => { await collectIndexStatsAll(); };
+  const runStorage = async () => { await collectStorageStatsAll(); };
+  const runDisk = async () => { await collectDiskUsageAll(); };
+  const runOplog = async () => { await collectOplogWindowAll(); };
 
   function scheduleStorage() {
     const delay = msUntilNextHour(STORAGE_HOUR);
-    const nextRun = new Date(Date.now() + delay);
-    console.log(`[storageStats] Next run at ${nextRun.toLocaleString()}`);
+    console.log(`[storageStats] Next run at ${new Date(Date.now() + delay).toLocaleString()}`);
     storageTimer = setTimeout(() => {
       runStorage().catch((err) => console.error("[polling] storage error:", err.message));
       scheduleStorage();
     }, delay);
   }
-  scheduleStorage();
 
-  statsTimer = setInterval(
-    () => runStats().catch((err) => console.error("[polling] stats error:", err.message)),
-    POLL_INTERVAL_STATS,
-  );
-  logsTimer = setInterval(
-    () => runLogs().catch((err) => console.error("[polling] logs error:", err.message)),
-    POLL_INTERVAL_LOGS,
-  );
-  indexTimer = setInterval(
-    () => runIndexes().catch((err) => console.error("[polling] index error:", err.message)),
-    POLL_INTERVAL_INDEXES,
-  );
-  diskTimer = setInterval(
-    () => runDisk().catch((err) => console.error("[polling] disk error:", err.message)),
-    POLL_INTERVAL_LOGS,
-  );
-  oplogTimer = setInterval(
-    () => runOplog().catch((err) => console.error("[polling] oplog error:", err.message)),
-    POLL_INTERVAL_LOGS,
-  );
+  /** Initial bootstrap: discovery + queryStats first, then everything that needs topology. */
+  const bootstrap = async () => {
+    await runStats();
+    await Promise.all([runLogs(), runIndexes(), runDisk(), runOplog()]);
+    console.log("[polling] initial poll complete — interval timers active");
+  };
+
+  bootstrap()
+    .catch((err) => console.error("[polling] bootstrap error:", err.message))
+    .then(() =>
+      getDb().collection(STORAGE_STATS).countDocuments()
+        .then((n) => {
+          if (n === 0) {
+            console.log("[storageStats] No data yet — running initial collection");
+            runStorage().catch((err) => console.error("[polling] storage error:", err.message));
+          }
+        })
+        .catch(() => {}),
+    )
+    .catch(() => {})
+    .finally(() => {
+      scheduleStorage();
+      statsTimer = setInterval(
+        () => runStats().catch((err) => console.error("[polling] stats error:", err.message)),
+        POLL_INTERVAL_STATS,
+      );
+      logsTimer = setInterval(
+        () => runLogs().catch((err) => console.error("[polling] logs error:", err.message)),
+        POLL_INTERVAL_LOGS,
+      );
+      indexTimer = setInterval(
+        () => runIndexes().catch((err) => console.error("[polling] index error:", err.message)),
+        POLL_INTERVAL_INDEXES,
+      );
+      diskTimer = setInterval(
+        () => runDisk().catch((err) => console.error("[polling] disk error:", err.message)),
+        POLL_INTERVAL_LOGS,
+      );
+      oplogTimer = setInterval(
+        () => runOplog().catch((err) => console.error("[polling] oplog error:", err.message)),
+        POLL_INTERVAL_LOGS,
+      );
+    });
 }
 
 function stopPolling() {
