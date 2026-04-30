@@ -287,17 +287,30 @@ Slow-query log lines are fetched with the **Atlas Admin API** (keys in the UI), 
 Embedded pollers run on fixed intervals (see `src/collector.js`):
 
 
-| Collector                             | Interval                                    | Source                                                                    | Stored as                   |
-| ------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------- | --------------------------- |
-| `$queryStats` + topology              | 5 min                                       | Each replica member via `directConnection`; `hello` on default connection | `query_stats`, `topologies` |
-| Atlas slow query logs                 | 10 min                                      | Performance Advisor API per host (if keys set)                            | `slow_queries`              |
-| `$indexStats` (unused / redundant)    | 10 min                                      | Per host / primary                                                        | `index_stats`               |
-| Disk usage (`dbStats` on `admin`)     | 10 min                                      | Cluster connection                                                        | `disk_usage`                |
-| Oplog window                          | 10 min                                      | First/last `ts` on `local.oplog.rs`                                       | `oplog_window`              |
-| Storage & fragmentation (`collStats`) | Daily ~3:00 local; once on startup if empty | Cluster connection                                                        | `storage_stats`             |
+| Collector                             | Interval                                    | Source                                                                                                     | Stored as                   |
+| ------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | --------------------------- |
+| Topology discovery                    | 5 min + on URI change + manual `Refresh`    | `hello`, `serverStatus.catalogStats`, `listDatabases`; SRV resolution of the URI hostname                  | `topologies`                |
+| `$queryStats`                         | 5 min                                       | Each replica member via `directConnection`                                                                 | `query_stats`               |
+| Atlas slow query logs                 | 5 min                                       | Performance Advisor API per Atlas process (if keys set); rolling **24h + 6m overlap** lookback             | `slow_queries`              |
+| `$indexStats` (unused / redundant)    | 10 min                                      | Per host / primary                                                                                         | `index_stats`               |
+| Disk usage (`dbStats` on `admin`)     | 5 min                                       | Cluster connection                                                                                         | `disk_usage`                |
+| Oplog window                          | 5 min                                       | First/last `ts` on `local.oplog.rs`                                                                        | `oplog_window`              |
+| Storage & fragmentation (`collStats`) | Daily ~3:00 local; once on startup; on cluster create | Cluster connection                                                                                         | `storage_stats`             |
 
 
-Queries from internal agents (`MongoDB Automation Agent`, `MongoDB Monitoring Module`) are filtered at ingestion for `$queryStats`.
+On startup, **all collectors** (including storage) run once after the initial topology discovery so per-host queries see a populated `topologies` document; the periodic timers start after that initial pass completes. When a new cluster is registered via `POST /api/clusters`, discovery + a one-shot `$queryStats` + storage pass run for that cluster so the dashboard fills in immediately.
+
+Queries from internal agents (`MongoDB Automation Agent`, `MongoDB Monitoring Module`) and from the MongoAdvisor app itself (`appName: "mongoadvisor"`) are filtered at ingestion. System DBs (`admin`, `config`, `local`, `mongoadvisor`, `#mongodb-mcp`) are dropped from `query_stats` and `slow_queries` ingestion (see `src/hidden-dbs.js`).
+
+### Topology discovery and Atlas DNS aliases
+
+`hello` returns the **internal replica set member names** (e.g. `atlas-xxxxxx-shard-00-01.mongodb.net`). When a single Atlas project has multiple cluster DNS aliases that point at the same physical replica set, `hello.hosts` looks identical for both — that is misleading in the UI and breaks per-cluster filtering.
+
+Discovery handles this by resolving the SRV record from the URI hostname (`_mongodb._tcp.<cluster-alias>.mongodb.net`) and storing the **alias-prefixed** hostnames (e.g. `workload-shard-00-01.mongodb.net`) when they differ from `hello.hosts`. The Performance Advisor `slowQueryLogs` collector additionally calls Atlas `listGroupProcesses` to use the **correct Atlas process ID** for each replica member instead of relying on `hello.hosts`.
+
+If `hello` fails (e.g. wrong credentials in the URI) but SRV resolution succeeds, the topology is still saved with SRV-derived hostnames and `helloOk: false`. The UI shows a red **⚠ auth failed** badge next to the topology so the misconfiguration is obvious.
+
+When `hello` succeeds, discovery also runs `serverStatus({ catalogStats: 1 })` and `listDatabases({ nameOnly: true })`. The result is stored on the topology document as `catalogStats`, `databases`, and `catalogTooLarge` (true when `catalogStats.collections > 10_000`). Heavy per-collection collectors (`storage_stats`, `index_stats`) are skipped for clusters with `catalogTooLarge: true` and the UI surfaces a **⚠ N collections — heavy scans skipped** badge with a link to the [Reduce the Number of Collections](https://www.mongodb.com/docs/manual/data-modeling/design-antipatterns/reduce-collections/#reduce-the-number-of-collections) anti-pattern doc. The Databases filter (`/api/metrics/databases`) reads from `topologies.databases`, so even brand-new clusters with no `query_stats` data yet still show database checkboxes immediately after the first discovery.
 
 ### Stored document timestamp (query_stats and slow_queries)
 
@@ -348,11 +361,11 @@ The frontend (`public/`) uses Chart.js. Highlights:
 Charts that use query stats or slow queries honor:
 
 
-| Filter         | Description                                                                                                |
-| -------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Time range** | 5 min, 1 hour, 1 day, 1 week, or all                                                                       |
-| **Nodes**      | One checkbox per replica set member (from topology)                                                        |
-| **Namespaces** | `db.collection`; system DBs and the app DB `mongoadvisor` hidden from the picker (see `src/hidden-dbs.js`) |
+| Filter         | Description                                                                                                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Time range** | 5 min, 1 hour, 1 day, 1 week, or all                                                                                                                                         |
+| **Nodes**      | One checkbox per replica set member (from topology); reset to "all checked" when the dashboard cluster select changes                                                        |
+| **Databases**  | Distinct top-level databases from `query_stats`; system DBs and the app DB `mongoadvisor` hidden from the picker (see `src/hidden-dbs.js`); reset to "all checked" on switch |
 
 
 ## API endpoints
@@ -371,8 +384,9 @@ Charts that use query stats or slow queries honor:
 | `GET`    | `/api/atlas/database-users/defaults`     | Optional `{ projectId, publicKey }` from server env (for scripts / `curl`)                                |
 | `POST`   | `/api/atlas/database-users`              | Create Atlas SCRAM user (credentials in JSON body)                                                        |
 | `GET`    | `/api/topologies`                        | All topologies                                                                                            |
-| `POST`   | `/api/topologies/:id/discover`           | Refresh topology                                                                                          |
-| `GET`    | `/api/metrics/namespaces`                | Distinct namespaces for filters                                                                           |
+| `POST`   | `/api/topologies/:id/discover`           | Refresh topology (also runs automatically after `PATCH /api/clusters/:id` when `uri` changes)              |
+| `GET`    | `/api/metrics/databases`                 | Distinct top-level databases for filters                                                                  |
+| `GET`    | `/api/metrics/namespaces`                | Distinct namespaces (for backwards compatibility / scripting)                                             |
 | `GET`    | `/api/metrics/hosts`                     | Distinct hosts from topology                                                                              |
 | `GET`    | `/api/metrics/app-load`                  | Aggregated load by appName                                                                                |
 | `GET`    | `/api/metrics/query-stats`               | Raw `$queryStats`-backed snapshots                                                                        |
@@ -389,7 +403,7 @@ Charts that use query stats or slow queries honor:
 | `GET`    | `/api/metrics/monitor-logs`              | Collector/API audit (`?limit=`, `?since=`, `?clusterId=`, `?action=`, `?outcome=`)                        |
 
 
-Common query parameters: `since` (ISO date, compared to each document's `timestamp` — see [Stored document timestamp (query_stats and slow_queries)](#stored-document-timestamp-query_stats-and-slow_queries)), `namespace` (repeatable), `host` (repeatable), `clusterId`.
+Common query parameters: `since` (ISO date, compared to each document's `timestamp` — see [Stored document timestamp (query_stats and slow_queries)](#stored-document-timestamp-query_stats-and-slow_queries)), `database` (repeatable, prefix-matches `namespace`), `namespace` (repeatable, exact match — takes precedence when both are sent), `host` (repeatable), `clusterId`.
 
 ## Application database indexes
 

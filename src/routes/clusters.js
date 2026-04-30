@@ -12,6 +12,19 @@ const COLLECTION = "clusters";
 
 const ENCRYPTED_FIELDS = ["uri", "atlasPrivateKey"];
 
+const VALID_ENVIRONMENTS = new Set(["production", "staging", "dev"]);
+
+/** Production clusters require an explicit confirmation before explain() runs against them. */
+function isProtectedCluster(cluster) {
+  return cluster && cluster.environment === "production";
+}
+
+function normalizeEnvironment(value) {
+  if (value == null || value === "") return null;
+  const v = String(value).trim().toLowerCase();
+  return VALID_ENVIRONMENTS.has(v) ? v : undefined;
+}
+
 function decryptField(value) {
   return value && isEncrypted(value) ? decrypt(value) : value;
 }
@@ -42,6 +55,8 @@ function sanitizeCluster(doc) {
     const plain = decryptField(out.atlasPrivateKey);
     out.atlasPrivateKey = maskKey(plain);
   }
+  // Surface a defaulted environment so the UI doesn't have to guess about pre-existing rows.
+  out.environment = out.environment || "dev";
   return out;
 }
 
@@ -111,6 +126,15 @@ router.patch("/:id", async (req, res, next) => {
     if (Object.prototype.hasOwnProperty.call(body, "atlasPrivateKey")) {
       const k = String(body.atlasPrivateKey ?? "").trim();
       $set.atlasPrivateKey = k ? encryptField(k) : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "environment")) {
+      const env = normalizeEnvironment(body.environment);
+      if (env === undefined) {
+        return res.status(400).json({
+          error: `environment must be one of: ${[...VALID_ENVIRONMENTS].join(", ")}`,
+        });
+      }
+      $set.environment = env || "dev";
     }
 
     if (Object.keys($set).length === 0) {
@@ -250,9 +274,15 @@ router.post("/:id/atlas-database-users", async (req, res, next) => {
 
 router.post("/", async (req, res, next) => {
   try {
-    const { name, uri, provider, atlasProjectId, atlasPublicKey, atlasPrivateKey } = req.body;
+    const { name, uri, provider, atlasProjectId, atlasPublicKey, atlasPrivateKey, environment } = req.body;
     if (!name || !uri) {
       return res.status(400).json({ error: "name and uri are required" });
+    }
+    const env = normalizeEnvironment(environment);
+    if (env === undefined) {
+      return res.status(400).json({
+        error: `environment must be one of: ${[...VALID_ENVIRONMENTS].join(", ")}`,
+      });
     }
     const doc = {
       name,
@@ -261,6 +291,7 @@ router.post("/", async (req, res, next) => {
       atlasProjectId: atlasProjectId || null,
       atlasPublicKey: atlasPublicKey || null,
       atlasPrivateKey: encryptField(atlasPrivateKey),
+      environment: env || "dev",
       isPolling: true,
       createdAt: new Date(),
     };
@@ -275,6 +306,31 @@ router.post("/", async (req, res, next) => {
       targetCollection: COLLECTION,
       detail: `registered cluster "${name}"`,
     });
+
+    // Kick off topology discovery so the new cluster's members appear in the UI immediately.
+    // SRV-resolved hostnames are written even if the live `hello` fails, so a typo in the URI
+    // still yields a topology row with `helloOk: false` and the red badge in the UI.
+    const { discoverOne } = require("../discovery");
+    const collector = require("../collector");
+    discoverOne(created)
+      .then(() => {
+        // After discovery succeeds, run a one-shot collection pass for this cluster so
+        // queryStats / databases / storage panels populate without waiting for the next tick.
+        if (typeof collector.collectQueryStats === "function") {
+          collector.collectQueryStats(created).catch((err) =>
+            console.error(`[queryStats] post-create for "${name}" failed:`, err.message),
+          );
+        }
+        if (typeof collector.collectStorageStatsForCluster === "function") {
+          collector.collectStorageStatsForCluster(created).catch((err) =>
+            console.error(`[storageStats] post-create for "${name}" failed:`, err.message),
+          );
+        }
+      })
+      .catch((err) =>
+        console.error(`[discovery] post-create discover for "${name}" failed:`, err.message),
+      );
+
     res.status(201).json(sanitizeCluster(created));
   } catch (err) {
     next(err);
@@ -348,13 +404,43 @@ router.post("/:id/explain", async (req, res, next) => {
     const namespace = typeof body.namespace === "string" ? body.namespace.trim() : "";
     const rawCommand = body.command;
     const verbosity = ALLOWED_EXPLAIN_VERBOSITY.has(body.verbosity) ? body.verbosity : "executionStats";
+
+    // Production guardrail: require explicit double-confirmation (checkbox + typed cluster name).
+    // The UI surfaces a red banner so this never fires from a normal flow without intent.
+    const protectedCluster = isProtectedCluster(cluster);
+    if (protectedCluster) {
+      const confirmed = body.confirmProduction === true;
+      const namedMatches = typeof body.confirmClusterName === "string"
+        && body.confirmClusterName === cluster.name;
+      if (!confirmed || !namedMatches) {
+        await logMonitorEvent({
+          source: "api",
+          action: "explain.run",
+          outcome: "blocked",
+          clusterId: cluster._id,
+          clusterName: cluster.name,
+          targetCollection: "slow_queries",
+          detail: "production explain blocked: missing confirmation",
+          meta: { environment: cluster.environment, namespace, verbosity },
+        }).catch(() => {});
+        return res.status(403).json({
+          error: "Explain on a production cluster requires explicit confirmation",
+          code: "PRODUCTION_CONFIRM_REQUIRED",
+          clusterName: cluster.name,
+          environment: cluster.environment,
+        });
+      }
+    }
+
     // Cap the user-requested timeout to something sane: 5s lower bound (so we always give
     // the server room to parse+plan) and 10 minutes upper bound (to prevent runaway explains
-    // from holding an HTTP worker forever).
+    // from holding an HTTP worker forever). Production clusters get a tighter 60s cap so a
+    // misclick cannot park a long-running explain on prod.
     const requestedTimeoutMs = Number(body.timeoutMs);
+    const HARD_MAX_TIMEOUT_MS = protectedCluster ? 60_000 : 600_000;
     const EXPLAIN_TIMEOUT_MS = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
-      ? Math.min(Math.max(requestedTimeoutMs, 5_000), 600_000)
-      : 120_000;
+      ? Math.min(Math.max(requestedTimeoutMs, 5_000), HARD_MAX_TIMEOUT_MS)
+      : Math.min(120_000, HARD_MAX_TIMEOUT_MS);
 
     if (!namespace || !namespace.includes(".")) {
       return res.status(400).json({ error: "namespace (db.collection) is required" });
@@ -412,7 +498,15 @@ router.post("/:id/explain", async (req, res, next) => {
       clusterName: cluster.name,
       targetCollection: "slow_queries",
       detail: `explain(${verbosity}) on ${namespace} — ${op}`,
-      meta: { namespace, op, verbosity, elapsedMs, timeoutMs: EXPLAIN_TIMEOUT_MS },
+      meta: {
+        namespace,
+        op,
+        verbosity,
+        elapsedMs,
+        timeoutMs: EXPLAIN_TIMEOUT_MS,
+        environment: cluster.environment || "dev",
+        confirmedBy: protectedCluster ? "ui" : undefined,
+      },
     });
 
     // Serialize with EJSON so BSON types (Long, Date, ObjectId) survive JSON transport.
@@ -432,6 +526,7 @@ router.post("/:id/explain", async (req, res, next) => {
       clusterId: cluster?._id,
       clusterName: cluster?.name,
       error: err.message,
+      meta: { environment: cluster?.environment || "dev" },
     }).catch(() => {});
     // Surface the driver's error message so the UI can show why explain failed
     // (invalid command shape, auth, missing index on explained field, etc.).

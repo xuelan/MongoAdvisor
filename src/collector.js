@@ -318,6 +318,24 @@ async function collectQueryStatsAll() {
       console.log(`[queryStats] ${cluster.name}: skipped (isPolling=false)`);
       continue;
     }
+    // Server-version gate: $queryStats is only available on MongoDB 7.0+. Skip cleanly when
+    // the topology has marked it unsupported so we don't spam logs every 5 minutes.
+    const topology = await getDb().collection("topologies").findOne({ clusterId: cluster._id });
+    if (topology && topology.queryStatsSupported === false) {
+      console.log(
+        `[queryStats] ${cluster.name}: skipped — MongoDB ${topology.serverVersion || "<unknown>"} (requires ${topology.queryStatsMinVersion || "7.0"}+)`,
+      );
+      await logMonitorEvent({
+        action: "queryStats.collect",
+        outcome: "skipped",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: QUERY_STATS,
+        detail: `skipped: server version ${topology.serverVersion || "unknown"} is below ${topology.queryStatsMinVersion || "7.0"}`,
+        meta: { serverVersion: topology.serverVersion || null },
+      });
+      continue;
+    }
     try {
       const count = await collectQueryStats(cluster);
       console.log(`[queryStats] ${cluster.name}: ${count} entries collected (all nodes)`);
@@ -514,6 +532,19 @@ async function collectSlowQueries(cluster) {
     console.warn(`[slowQueries] ${cluster.name}: listGroupProcesses failed (${err.message}) — using topology hosts`);
   }
 
+  // Build a map from the Atlas process ID (used in API URLs) → topology hostname (shown in UI filters).
+  // Slow-query rows are stored with the topology hostname so the Nodes filter on the UI matches.
+  function shardSuffix(h) {
+    const m = h && h.match(/(shard-\d+-\d+)/);
+    return m ? m[1] : null;
+  }
+  const processIdToTopologyHost = new Map();
+  for (const proc of processTargets) {
+    const suffix = shardSuffix(proc);
+    const match = suffix ? topology.hosts.find((h) => h.includes(suffix)) : null;
+    processIdToTopologyHost.set(proc, match || proc);
+  }
+
   const nowMs = Date.now();
   const sinceMs = nowMs - SLOW_QUERY_LOOKBACK_MS - SLOW_QUERY_OVERLAP_MS;
   const durationMs = nowMs - sinceMs;
@@ -579,7 +610,7 @@ async function collectSlowQueries(cluster) {
         const row = {
           clusterId: cluster._id,
           clusterName: cluster.name,
-          host,
+          host: processIdToTopologyHost.get(host) || host,
           timestamp: occurredAt || now,
           ctx: parsed.ctx,
           millis,
@@ -869,6 +900,20 @@ async function collectIndexStatsAll() {
         });
         continue;
       }
+      if (topology.catalogTooLarge) {
+        const n = topology.catalogStats?.collections ?? "?";
+        console.warn(`[indexStats] ${cluster.name}: skipped — catalog too large (${n} collections)`);
+        await logMonitorEvent({
+          action: "indexStats.collect",
+          outcome: "skipped",
+          clusterId: cluster._id,
+          clusterName: cluster.name,
+          targetCollection: INDEX_STATS,
+          detail: `skipped: catalog too large (${n} collections > ${topology.catalogThreshold || 10000})`,
+          meta: { catalogStats: topology.catalogStats || undefined },
+        });
+        continue;
+      }
 
       let namespaceList = [];
       let srvClient;
@@ -1058,6 +1103,21 @@ async function collectStorageStatsAll() {
   for (const cluster of clusters) {
     if (!isClusterPollingEnabled(cluster)) {
       console.log(`[storageStats] ${cluster.name}: skipped (isPolling=false)`);
+      continue;
+    }
+    const topology = await getDb().collection("topologies").findOne({ clusterId: cluster._id });
+    if (topology?.catalogTooLarge) {
+      const n = topology.catalogStats?.collections ?? "?";
+      console.warn(`[storageStats] ${cluster.name}: skipped — catalog too large (${n} collections)`);
+      await logMonitorEvent({
+        action: "storageStats.collect",
+        outcome: "skipped",
+        clusterId: cluster._id,
+        clusterName: cluster.name,
+        targetCollection: STORAGE_STATS,
+        detail: `skipped: catalog too large (${n} collections > ${topology.catalogThreshold || 10000})`,
+        meta: { catalogStats: topology.catalogStats || undefined },
+      });
       continue;
     }
     try {
@@ -1293,26 +1353,17 @@ function startPolling() {
     }, delay);
   }
 
-  /** Initial bootstrap: discovery + queryStats first, then everything that needs topology. */
+  /** Initial bootstrap: discovery + queryStats first, then everything that needs topology
+   *  (slow logs, index stats, disk, oplog, and storage). Storage is heavy but runs once
+   *  here so newly added clusters get coverage without waiting until the next 3 AM tick. */
   const bootstrap = async () => {
     await runStats();
-    await Promise.all([runLogs(), runIndexes(), runDisk(), runOplog()]);
+    await Promise.all([runLogs(), runIndexes(), runDisk(), runOplog(), runStorage()]);
     console.log("[polling] initial poll complete — interval timers active");
   };
 
   bootstrap()
     .catch((err) => console.error("[polling] bootstrap error:", err.message))
-    .then(() =>
-      getDb().collection(STORAGE_STATS).countDocuments()
-        .then((n) => {
-          if (n === 0) {
-            console.log("[storageStats] No data yet — running initial collection");
-            runStorage().catch((err) => console.error("[polling] storage error:", err.message));
-          }
-        })
-        .catch(() => {}),
-    )
-    .catch(() => {})
     .finally(() => {
       scheduleStorage();
       statsTimer = setInterval(
@@ -1353,4 +1404,12 @@ function stopPolling() {
   oplogTimer = null;
 }
 
-module.exports = { collectQueryStats, collectSlowQueries, startPolling, stopPolling };
+module.exports = {
+  collectQueryStats,
+  collectSlowQueries,
+  /** Per-cluster storage scan. Renamed in the export so callers don't accidentally trigger a
+   *  full all-clusters sweep when they only want to fill in data for a newly-added cluster. */
+  collectStorageStatsForCluster: collectStorageStats,
+  startPolling,
+  stopPolling,
+};

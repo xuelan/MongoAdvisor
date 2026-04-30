@@ -24,6 +24,11 @@
       <h2>Monitored Clusters</h2>
       <form class="add-cluster" id="addForm">
         <input name="name" placeholder="Cluster name" required>
+        <select name="environment" class="env-select" required title="Environment — production triggers extra confirmation before running explain()">
+          <option value="dev" selected>dev</option>
+          <option value="staging">staging</option>
+          <option value="production">production</option>
+        </select>
         <input name="uri" class="full" placeholder="Connection string (mongodb+srv://…)" required>
         <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
         <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
@@ -42,6 +47,11 @@
         </select>
         <form class="add-cluster cluster-edit-form" id="clusterEditForm">
           <input name="name" placeholder="Cluster name" required>
+          <select name="environment" class="env-select" required title="Environment — production triggers extra confirmation before running explain()">
+            <option value="dev">dev</option>
+            <option value="staging">staging</option>
+            <option value="production">production</option>
+          </select>
           <input name="uri" class="full" placeholder="New connection string (optional)" autocomplete="off">
           <input name="atlasProjectId" placeholder="Atlas Project ID (optional)">
           <input name="atlasPublicKey" placeholder="Atlas Public API Key (optional)">
@@ -123,7 +133,7 @@
       </section>
     </div>
 
-    <section class="card">
+    <section class="card qs-card">
       <div class="card-header-row">
         <h2>Execution Count by AppName <span class="subtitle">top 20</span></h2>
         <div class="info-btn-wrap">
@@ -131,10 +141,20 @@
           <div class="info-tooltip">Source is $queryStats, it collects and reports metrics for aggregate(), find(), and distinct() queries. Does not collect information for queries that use Queryable Encryption. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">More info</a></div>
         </div>
       </div>
-      <canvas id="appLoadExecChart"></canvas>
+      <canvas id="appLoadExecChart" class="qs-canvas"></canvas>
+      <div class="qs-unsupported-card-msg" hidden>
+        <span class="qs-unsupported-icon" aria-hidden="true">i</span>
+        <div>
+          <strong>$queryStats not available</strong> on this cluster
+          (<span class="qs-unsupported-version">—</span>).
+          This chart sources data from the
+          <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener"><code>$queryStats</code></a>
+          aggregation stage, which requires <strong>MongoDB 8.0 or later</strong>.
+        </div>
+      </div>
     </section>
 
-    <section class="card">
+    <section class="card qs-card">
       <div class="card-header-row">
         <h2>Total Execution Time by AppName <span class="subtitle">top 20</span></h2>
         <div class="info-btn-wrap">
@@ -142,10 +162,20 @@
           <div class="info-tooltip">Source is $queryStats, it collects and reports metrics for aggregate(), find(), and distinct() queries. Does not collect information for queries that use Queryable Encryption. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">More info</a></div>
         </div>
       </div>
-      <canvas id="appLoadTimeChart"></canvas>
+      <canvas id="appLoadTimeChart" class="qs-canvas"></canvas>
+      <div class="qs-unsupported-card-msg" hidden>
+        <span class="qs-unsupported-icon" aria-hidden="true">i</span>
+        <div>
+          <strong>$queryStats not available</strong> on this cluster
+          (<span class="qs-unsupported-version">—</span>).
+          This chart sources data from the
+          <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener"><code>$queryStats</code></a>
+          aggregation stage, which requires <strong>MongoDB 8.0 or later</strong>.
+        </div>
+      </div>
     </section>
 
-    <section class="card">
+    <section class="card qs-card">
       <div class="card-header-row">
         <h2>Slowest Queries by AppName <span class="subtitle">top 20</span></h2>
         <div class="info-btn-wrap">
@@ -153,7 +183,17 @@
           <div class="info-tooltip">Source is $queryStats, it collects and reports metrics for aggregate(), find(), and distinct() queries. Does not collect information for queries that use Queryable Encryption. <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">More info</a></div>
         </div>
       </div>
-      <canvas id="slowestAppChart"></canvas>
+      <canvas id="slowestAppChart" class="qs-canvas"></canvas>
+      <div class="qs-unsupported-card-msg" hidden>
+        <span class="qs-unsupported-icon" aria-hidden="true">i</span>
+        <div>
+          <strong>$queryStats not available</strong> on this cluster
+          (<span class="qs-unsupported-version">—</span>).
+          This chart sources data from the
+          <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener"><code>$queryStats</code></a>
+          aggregation stage, which requires <strong>MongoDB 8.0 or later</strong>.
+        </div>
+      </div>
     </section>
 
     <section class="card">
@@ -347,6 +387,25 @@
         </div>
         <div id="explainClusterWarn" class="explain-cluster-warn" hidden role="alert">
           Pick a target cluster before running <code>explain</code>.
+        </div>
+
+        <div id="explainProdWarn" class="explain-prod-warn" hidden role="alert" aria-live="polite">
+          <div class="explain-prod-warn-title">
+            <span class="explain-prod-warn-badge">PRODUCTION</span>
+            You are targeting a production cluster
+          </div>
+          <p class="explain-prod-warn-text">
+            Running <code>explain("executionStats")</code> on a production cluster <strong>executes the query</strong>
+            and may impact performance. Consider switching <strong>Verbosity</strong> to <code>queryPlanner</code>
+            (no execution). Confirm both fields below to enable Run.
+          </p>
+          <label class="explain-prod-warn-check">
+            <input type="checkbox" id="explainConfirmProd"> I understand the risk and want to run explain on this production cluster
+          </label>
+          <label class="explain-prod-warn-name">
+            Type the cluster name to confirm:
+            <input type="text" id="explainConfirmName" autocomplete="off" spellcheck="false" placeholder="cluster name">
+          </label>
         </div>
 
         <div class="explain-body-header">

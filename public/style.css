@@ -83,6 +83,32 @@ main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
   color: #ffb020;
   margin-left: 0.35rem;
 }
+
+.env-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.45rem;
+  border-radius: 4px;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+  cursor: help;
+}
+.env-badge.env-prod { color: #ff5050; background: rgba(255, 80, 80, 0.12); border: 1px solid rgba(255, 80, 80, 0.45); }
+.env-badge.env-staging { color: #ffb020; background: rgba(255, 176, 32, 0.12); border: 1px solid rgba(255, 176, 32, 0.4); }
+.env-badge.env-dev { color: #8899a6; background: rgba(136, 153, 166, 0.1); border: 1px solid rgba(136, 153, 166, 0.3); }
+
+.env-select {
+  background: #0f1923;
+  color: #e1e8ed;
+  border: 1px solid #1e3a4f;
+  border-radius: 6px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.85rem;
+  min-width: 6rem;
+}
+.env-select:focus { outline: 2px solid rgba(0, 237, 100, 0.4); outline-offset: 1px; }
 .cluster-form-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
 .cluster-form-feedback { margin: 0.5rem 0 0.75rem; padding: 0.55rem 0.85rem; border-radius: 6px; font-size: 0.85rem; font-weight: 500; }
 .cluster-form-feedback.ok { background: rgba(0, 237, 100, 0.12); color: #00ed64; border: 1px solid rgba(0, 237, 100, 0.35); }
@@ -124,6 +150,52 @@ main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 .topo-member.primary { background: rgba(0,237,100,0.15); color: #00ed64; }
 .topo-alias-note { font-size: 0.7rem; color: #e5a84b; padding: 0.1rem 0.4rem; background: rgba(229,168,75,0.1); border-radius: 4px; cursor: help; }
 .topo-error-note { font-size: 0.7rem; color: #ff6b6b; padding: 0.1rem 0.4rem; background: rgba(255,107,107,0.12); border-radius: 4px; cursor: help; }
+.topo-catalog-warn-wrap { display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.25rem; }
+.topo-catalog-warn { font-size: 0.7rem; color: #ffd93d; padding: 0.1rem 0.4rem; background: rgba(255, 217, 61, 0.12); border: 1px solid rgba(255, 217, 61, 0.35); border-radius: 4px; }
+
+/* Per-card "$queryStats not available" message shown in place of the chart canvas
+ * when the target cluster's MongoDB version is below the supported threshold (8.0+). */
+.qs-card .qs-canvas[hidden] { display: none !important; }
+.qs-unsupported-card-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  margin-top: 0.5rem;
+  padding: 0.85rem 1rem;
+  background: rgba(0, 163, 255, 0.08);
+  border: 1px dashed rgba(0, 163, 255, 0.45);
+  border-radius: 6px;
+  color: #c5dfff;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  min-height: 80px;
+}
+.qs-unsupported-card-msg[hidden] { display: none !important; }
+.qs-unsupported-card-msg .qs-unsupported-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid #00a3ff;
+  color: #00a3ff;
+  font-size: 0.7rem;
+  font-style: italic;
+  font-weight: 700;
+  font-family: Georgia, serif;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.05rem;
+}
+.qs-unsupported-card-msg code {
+  background: rgba(0, 163, 255, 0.15);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}
+.qs-unsupported-card-msg a { color: #00a3ff; }
+.qs-unsupported-card-msg strong { color: #e1e8ed; }
+.qs-unsupported-card-msg .qs-unsupported-version { color: #e1e8ed; font-weight: 500; }
 .btn-discover { padding: 0.2rem 0.6rem; font-size: 0.75rem; background: transparent; color: #5c6d7e; border: 1px solid #1e3a4f; border-radius: 4px; cursor: pointer; }
 .btn-discover:hover { border-color: #00ed64; color: #00ed64; }
 
@@ -590,6 +662,55 @@ form.add-cluster input.full { grid-column: 1 / -1; }
 .explain-cluster-select.is-invalid {
   border-color: rgba(255, 217, 61, 0.6);
   box-shadow: 0 0 0 1px rgba(255, 217, 61, 0.25);
+}
+
+/* ─── Production explain warning ─── */
+.explain-prod-warn {
+  margin: 0.4rem 0 0.7rem;
+  padding: 0.75rem 0.9rem;
+  background: rgba(255, 80, 80, 0.08);
+  border: 1px solid rgba(255, 80, 80, 0.5);
+  border-radius: 6px;
+  color: #ff9090;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.explain-prod-warn[hidden] { display: none !important; }
+.explain-prod-warn-title { display: flex; align-items: center; gap: 0.55rem; font-weight: 600; color: #ff7070; font-size: 0.9rem; }
+.explain-prod-warn-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: #ff5050;
+  color: #1a0a0a;
+}
+.explain-prod-warn-text { margin: 0; color: #f5b0b0; }
+.explain-prod-warn-text code {
+  background: rgba(255, 80, 80, 0.15);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}
+.explain-prod-warn-check { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #f5b0b0; }
+.explain-prod-warn-check input[type="checkbox"] { width: 1rem; height: 1rem; accent-color: #ff5050; cursor: pointer; }
+.explain-prod-warn-name { display: flex; flex-direction: column; gap: 0.3rem; color: #f5b0b0; font-size: 0.78rem; }
+.explain-prod-warn-name input[type="text"] {
+  background: #0f1923;
+  color: #e1e8ed;
+  border: 1px solid rgba(255, 80, 80, 0.5);
+  border-radius: 5px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.85rem;
+  font-family: monospace;
+}
+.explain-prod-warn-name input[type="text"]:focus {
+  outline: 2px solid rgba(255, 80, 80, 0.4);
+  outline-offset: 1px;
 }
 
 .explain-progress {

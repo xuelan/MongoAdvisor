@@ -81,7 +81,10 @@ router.get("/namespaces", async (req, res, next) => {
   }
 });
 
-// GET /api/metrics/databases -- distinct database names for filter dropdown (?clusterId=)
+// GET /api/metrics/databases -- database names from each cluster's topology document
+// (populated by discovery via `listDatabases`). This is the authoritative list and works
+// for newly-registered clusters that have no query_stats / slow_queries data yet.
+// Clusters with `catalogTooLarge: true` skip listDatabases and contribute nothing here.
 router.get("/databases", async (req, res, next) => {
   try {
     const match = {};
@@ -90,18 +93,17 @@ router.get("/databases", async (req, res, next) => {
       if (!ObjectId.isValid(sid)) return res.status(400).json({ error: "Invalid clusterId" });
       match.clusterId = new ObjectId(sid);
     }
-    const namespaces = await getDb()
-      .collection("query_stats")
-      .distinct("namespace", Object.keys(match).length ? match : undefined);
-    const databases = [
-      ...new Set(
-        namespaces
-          .filter(Boolean)
-          .map((ns) => ns.split(".")[0])
-          .filter((db) => db && !isHiddenTopLevelDb(db)),
-      ),
-    ].sort();
-    res.json(databases);
+    const topos = await getDb()
+      .collection("topologies")
+      .find(match, { projection: { databases: 1 } })
+      .toArray();
+    const dbs = new Set();
+    for (const t of topos) {
+      for (const d of t.databases || []) {
+        if (d && !isHiddenTopLevelDb(d)) dbs.add(d);
+      }
+    }
+    res.json([...dbs].sort());
   } catch (err) {
     next(err);
   }

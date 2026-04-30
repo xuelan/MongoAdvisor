@@ -126,6 +126,18 @@ async function loadTopologies() {
   } catch { /* ignore */ }
 }
 
+/** Small badge shown next to the cluster name in the list to flag protected environments. */
+function renderEnvBadge(env) {
+  const v = (env || "dev").toLowerCase();
+  if (v === "production") {
+    return '<span class="env-badge env-prod" title="Explain on this cluster requires explicit confirmation">PROD</span>';
+  }
+  if (v === "staging") {
+    return '<span class="env-badge env-staging" title="Staging environment">STG</span>';
+  }
+  return '<span class="env-badge env-dev" title="Development environment">DEV</span>';
+}
+
 function renderTopology(clusterId) {
   const t = topologyMap[clusterId];
   if (!t || !t.hosts.length)
@@ -161,6 +173,24 @@ function renderTopology(clusterId) {
   if (t.helloOk === false) {
     const errMsg = t.helloError ? String(t.helloError).replace(/"/g, "&quot;") : "Connection error";
     notes.push(`<span class="topo-error-note" title="${errMsg}">⚠ auth failed — verify connection string</span>`);
+  }
+  if (t.catalogTooLarge) {
+    const colls = t.catalogStats?.collections ?? "?";
+    const threshold = t.catalogThreshold || 10000;
+    notes.push(`
+      <span class="topo-catalog-warn-wrap">
+        <span class="topo-catalog-warn">⚠ ${colls} collections — heavy scans skipped</span>
+        <span class="info-btn-wrap">
+          <button type="button" class="info-btn warn" aria-label="Why are scans skipped?">i</button>
+          <div class="info-tooltip info-tooltip-wide">
+            <strong>Large number of collections detected (${colls} > ${threshold}).</strong>
+            Creating too many collections can decrease performance, so MongoAdvisor is skipping
+            per-collection scans (storage, fragmentation, indexStats) on this cluster.
+            <a href="https://www.mongodb.com/docs/manual/data-modeling/design-antipatterns/reduce-collections/#reduce-the-number-of-collections" target="_blank" rel="noopener">Reduce the Number of Collections — MongoDB Docs</a>
+          </div>
+        </span>
+      </span>
+    `);
   }
 
   return `<div class="topology">
@@ -306,12 +336,43 @@ function hostSelectNone() {
 
 // ─── Metrics ────────────────────────────────────────────────────────
 
+/** Toggle the per-card "$queryStats not available" notice on the three queryStats-driven
+ *  cards (Execution Count, Total Time, Slowest by AppName). When the cluster's MongoDB
+ *  version is below the supported threshold we hide the canvas and show the message in place. */
+function updateQueryStatsUnsupportedBanner() {
+  const cid = getDashboardClusterId();
+  const t = cid ? topologyMap[cid] : null;
+  const unsupported = !!(t && t.queryStatsSupported === false);
+  const versionLabel = `MongoDB ${t?.serverVersion || "<unknown version>"}`;
+
+  document.querySelectorAll(".qs-card").forEach((card) => {
+    const msg = card.querySelector(".qs-unsupported-card-msg");
+    const canvas = card.querySelector(".qs-canvas");
+    if (msg) msg.hidden = !unsupported;
+    if (canvas) canvas.hidden = unsupported;
+    const verEl = msg?.querySelector(".qs-unsupported-version");
+    if (verEl) verEl.textContent = versionLabel;
+  });
+
+  // When unsupported, destroy any leftover Chart.js instances so they don't render on the
+  // hidden canvas and so the next switch back to a supported cluster rebuilds them cleanly.
+  if (unsupported) {
+    destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart]);
+    appLoadExecChart = appLoadTimeChart = slowestAppChart = null;
+  }
+}
+
 async function loadMetrics() {
+  updateQueryStatsUnsupportedBanner();
+  const cid = getDashboardClusterId();
+  const t = cid ? topologyMap[cid] : null;
+  const queryStatsUnsupported = !!(t && t.queryStatsSupported === false);
+
   if (!getSelectedDatabases().length || !getSelectedHosts().length) {
     destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart, bubbleChart, treemapIOChart, treemapCPUChart]);
     appLoadExecChart = appLoadTimeChart = slowestAppChart = bubbleChart = treemapIOChart = treemapCPUChart = null;
   } else {
-    await loadAppLoad();
+    if (!queryStatsUnsupported) await loadAppLoad();
     await loadBubbleChart();
     await loadImpactChart();
   }
@@ -1173,6 +1234,7 @@ async function loadClusters() {
         <div class="cluster-header">
           <div>
             <span class="cluster-name">${displayName}</span>
+            ${renderEnvBadge(c.environment)}
             ${pollingOff ? '<span class="cluster-polling-paused" title="Scheduled metrics collection is paused for this cluster">polling paused</span>' : ""}
             ${c.atlasProjectId ? `<a class="atlas-link" href="https://cloud.mongodb.com/v2/${c.atlasProjectId}#/clusters/detail/${c.name}" target="_blank">Atlas Console</a>` : ""}
           </div>
@@ -1213,6 +1275,7 @@ document.getElementById("addForm").addEventListener("submit", async (e) => {
         name: form.get("name"),
         uri: form.get("uri"),
         region: form.get("region"),
+        environment: form.get("environment") || "dev",
         atlasProjectId: form.get("atlasProjectId") || undefined,
         atlasPublicKey: form.get("atlasPublicKey") || undefined,
         atlasPrivateKey: form.get("atlasPrivateKey") || undefined,
@@ -1224,8 +1287,15 @@ document.getElementById("addForm").addEventListener("submit", async (e) => {
       return;
     }
     e.target.reset();
-    showClusterFormFeedback("Cluster registered.", false);
-    loadClusters();
+    showClusterFormFeedback("Cluster registered — discovering topology…", false);
+    // Show the newly-added cluster (without topology) right away, then re-load once discovery
+    // finishes so the topology members appear without the user having to refresh.
+    await loadClusters();
+    setTimeout(() => {
+      loadClusters();
+      loadHosts({ resetAll: false });
+      loadDatabases({ resetAll: false });
+    }, 2500);
   } catch (err) {
     showClusterFormFeedback(err.message || "Network error", true);
   }
@@ -1273,6 +1343,7 @@ document.getElementById("clusterEditSelect")?.addEventListener("change", async (
     if (!res.ok) return;
     const q = (n) => form.querySelector(`[name="${n}"]`);
     if (q("name")) q("name").value = c.name || "";
+    if (q("environment")) q("environment").value = c.environment || "dev";
     if (q("region")) q("region").value = c.region && c.region !== "unknown" ? c.region : "";
     if (q("uri")) q("uri").value = "";
     if (q("atlasProjectId")) q("atlasProjectId").value = c.atlasProjectId || "";
@@ -1295,6 +1366,7 @@ document.getElementById("clusterEditForm")?.addEventListener("submit", async (e)
   const fd = new FormData(form);
   const body = {
     name: (fd.get("name") || "").trim(),
+    environment: (fd.get("environment") || "dev").trim(),
     region: (fd.get("region") || "").trim() || "unknown",
     atlasProjectId: (fd.get("atlasProjectId") || "").trim() || null,
     atlasPublicKey: (fd.get("atlasPublicKey") || "").trim() || null,
@@ -1498,29 +1570,65 @@ let explainCommandBody = null;
 /** Namespace resolved from the slow-query sample (falls back to the tile's namespace). */
 let explainNamespaceResolved = null;
 
+/** Look up the selected explain target cluster object (or null). */
+function getExplainSelectedCluster() {
+  const sel = document.getElementById("explainClusterSelect");
+  const id = sel?.value;
+  if (!id) return null;
+  return clusters.find((c) => String(c._id) === String(id)) || null;
+}
+
+function isProductionEnv(c) {
+  return !!c && c.environment === "production";
+}
+
 function setExplainRunEnabled() {
   const btn = document.getElementById("explainRunBtn");
   const sel = document.getElementById("explainClusterSelect");
   const warn = document.getElementById("explainClusterWarn");
+  const prodWarn = document.getElementById("explainProdWarn");
+  const confirmCk = document.getElementById("explainConfirmProd");
+  const confirmName = document.getElementById("explainConfirmName");
   if (!btn || !sel) return;
-  const hasCluster = !!sel.value;
+
+  const cluster = getExplainSelectedCluster();
+  const hasCluster = !!cluster;
   const hasCommand = !!explainCommandBody && typeof explainCommandBody === "object";
   const hasNs = !!(explainNamespaceResolved && explainNamespaceResolved.includes("."));
-  btn.disabled = !(hasCluster && hasCommand && hasNs);
+  const isProd = isProductionEnv(cluster);
+
+  // Production gate: checkbox AND typed name match required
+  const prodConfirmed = !isProd || (
+    !!confirmCk && confirmCk.checked
+    && !!confirmName && confirmName.value.trim() === cluster.name
+  );
+
+  btn.disabled = !(hasCluster && hasCommand && hasNs && prodConfirmed);
   if (btn.disabled) {
     if (!hasCommand) btn.title = "Waiting for the query body to load";
     else if (!hasNs) btn.title = "Query namespace could not be determined";
     else if (!hasCluster) btn.title = "Pick a target cluster first";
+    else if (isProd && !prodConfirmed) btn.title = "Confirm the production warning before running";
+    else btn.title = "";
   } else {
     btn.title = "";
   }
-  // Show the "pick a cluster" warning only once the query body is ready — otherwise
-  // we'd flash it during the brief loading window even though the user has nothing
-  // actionable to do yet.
+
+  // Production cluster: show the strong red warning, hide the soft "pick a cluster" one
+  if (prodWarn) prodWarn.hidden = !(hasCluster && hasCommand && hasNs && isProd);
+
+  // Soft "pick a cluster" warning only when the body is ready and no cluster is selected
   if (warn) {
     const shouldWarn = hasCommand && hasNs && !hasCluster;
     warn.hidden = !shouldWarn;
     sel.classList.toggle("is-invalid", shouldWarn);
+  }
+
+  // Update the Run button label so users know whether the click will execute or not
+  if (cluster) {
+    const verbosityEl = document.getElementById("explainVerbosity");
+    const v = verbosityEl?.value || "executionStats";
+    btn.textContent = `Run explain("${v}")`;
   }
 }
 
@@ -1566,6 +1674,12 @@ function openExplainModal(ctx) {
   document.getElementById("explainError").textContent = "";
   const warn = document.getElementById("explainClusterWarn");
   if (warn) warn.hidden = true;
+  const prodWarn = document.getElementById("explainProdWarn");
+  if (prodWarn) prodWarn.hidden = true;
+  const confirmCk = document.getElementById("explainConfirmProd");
+  if (confirmCk) confirmCk.checked = false;
+  const confirmName = document.getElementById("explainConfirmName");
+  if (confirmName) confirmName.value = "";
   const selReset = document.getElementById("explainClusterSelect");
   if (selReset) selReset.classList.remove("is-invalid");
 
@@ -1668,9 +1782,15 @@ async function runExplainOnSelectedCluster() {
   const clusterId = sel?.value;
   if (!clusterId || !explainCommandBody || !explainNamespaceResolved) return;
 
+  const cluster = getExplainSelectedCluster();
+  const isProd = isProductionEnv(cluster);
+  // For production targets, the server clamps the timeout to 60s anyway — make the UI cap match.
   const verbosity = document.getElementById("explainVerbosity")?.value || "executionStats";
   const timeoutRaw = Number(document.getElementById("explainTimeoutSec")?.value || 120);
-  const timeoutSec = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? Math.min(Math.max(timeoutRaw, 5), 600) : 120;
+  const timeoutCapSec = isProd ? 60 : 600;
+  const timeoutSec = Number.isFinite(timeoutRaw) && timeoutRaw > 0
+    ? Math.min(Math.max(timeoutRaw, 5), timeoutCapSec)
+    : Math.min(120, timeoutCapSec);
 
   errBox.hidden = true;
   errBox.textContent = "";
@@ -1702,15 +1822,20 @@ async function runExplainOnSelectedCluster() {
 
   const started = Date.now();
   try {
+    const reqBody = {
+      namespace: explainNamespaceResolved,
+      command: explainCommandBody,
+      verbosity,
+      timeoutMs: timeoutSec * 1000,
+    };
+    if (isProd && cluster) {
+      reqBody.confirmProduction = true;
+      reqBody.confirmClusterName = cluster.name;
+    }
     const res = await fetch(`${API}/api/clusters/${clusterId}/explain`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        namespace: explainNamespaceResolved,
-        command: explainCommandBody,
-        verbosity,
-        timeoutMs: timeoutSec * 1000,
-      }),
+      body: JSON.stringify(reqBody),
     });
 
     let data = null;
@@ -1990,7 +2115,32 @@ document.getElementById("explainToggleFullBtn")?.addEventListener("click", () =>
   btn.setAttribute("aria-expanded", String(willShow));
   btn.textContent = willShow ? "Hide full plan JSON" : "Show full plan JSON";
 });
-document.getElementById("explainClusterSelect")?.addEventListener("change", setExplainRunEnabled);
+document.getElementById("explainClusterSelect")?.addEventListener("change", () => {
+  // When the user picks a production cluster, default verbosity to queryPlanner (no execution),
+  // tighten the timeout cap to 60s, and prefill the typed-confirmation field for convenience.
+  const cluster = getExplainSelectedCluster();
+  if (isProductionEnv(cluster)) {
+    const v = document.getElementById("explainVerbosity");
+    if (v && v.value !== "queryPlanner") v.value = "queryPlanner";
+    const timeoutEl = document.getElementById("explainTimeoutSec");
+    if (timeoutEl) {
+      timeoutEl.max = "60";
+      if (Number(timeoutEl.value) > 60) timeoutEl.value = "60";
+    }
+    // Reset confirm fields whenever the target changes so the user has to re-confirm
+    const confirmCk = document.getElementById("explainConfirmProd");
+    if (confirmCk) confirmCk.checked = false;
+    const confirmName = document.getElementById("explainConfirmName");
+    if (confirmName) confirmName.value = "";
+  } else {
+    const timeoutEl = document.getElementById("explainTimeoutSec");
+    if (timeoutEl) timeoutEl.max = "600";
+  }
+  setExplainRunEnabled();
+});
+document.getElementById("explainVerbosity")?.addEventListener("change", setExplainRunEnabled);
+document.getElementById("explainConfirmProd")?.addEventListener("change", setExplainRunEnabled);
+document.getElementById("explainConfirmName")?.addEventListener("input", setExplainRunEnabled);
 document.getElementById("explainRunBtn")?.addEventListener("click", runExplainOnSelectedCluster);
 
 document.getElementById("dashboardClusterSelect")?.addEventListener("change", () => {

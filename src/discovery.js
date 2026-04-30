@@ -4,9 +4,29 @@ const { ensureConnected } = require("./pool-cache");
 const { decrypt, isEncrypted } = require("./crypto");
 const { logMonitorEvent } = require("./monitor-log");
 const { isClusterPollingEnabled } = require("./cluster-polling");
+const { isHiddenTopLevelDb } = require("./hidden-dbs");
 
 const TOPOLOGIES = "topologies";
 const CLUSTERS = "clusters";
+
+/** Threshold above which per-collection scans (storageStats, indexStats) are skipped to protect
+ *  the cluster from a heavy `collStats` / `$indexStats` sweep across thousands of namespaces.
+ *  See https://www.mongodb.com/docs/manual/data-modeling/design-antipatterns/reduce-collections/ */
+const CATALOG_TOO_LARGE_THRESHOLD = 10_000;
+
+/** $queryStats was introduced in MongoDB 7.0 but required a non-default
+ *  `internalQueryStatsRateLimit` parameter to actually emit any data. From 8.0+ it ships with
+ *  sane defaults, so we only consider 8.0+ as truly "supported" for this dashboard.
+ *  See https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/ */
+const QUERY_STATS_MIN_MAJOR = 8;
+
+/** True when [major, minor, patch] >= [QUERY_STATS_MIN_MAJOR, 0, 0]. */
+function supportsQueryStats(versionArray) {
+  if (!Array.isArray(versionArray) || versionArray.length === 0) return null;
+  const major = Number(versionArray[0]);
+  if (!Number.isFinite(major)) return null;
+  return major >= QUERY_STATS_MIN_MAJOR;
+}
 
 function decryptUri(uri) {
   return uri && isEncrypted(uri) ? decrypt(uri) : uri;
@@ -99,6 +119,67 @@ async function discoverOne(cluster) {
     canonicalPrimary = rawPrimary;
   }
 
+  // Step 3: When the live connection works, fetch catalog stats + database list + buildInfo.
+  // - serverStatus.catalogStats.collections gates per-collection scans (storage / indexStats).
+  // - listDatabases populates the topology.databases used by the UI Databases filter.
+  // - buildInfo.versionArray gates $queryStats (introduced in MongoDB 7.0).
+  let catalogStats = null;
+  let catalogTooLarge = false;
+  let catalogError = null;
+  let databases = [];
+  let serverVersion = null;
+  let serverVersionArray = null;
+  let queryStatsSupported = null;
+  if (hello && !helloError) {
+    try {
+      const client = await ensureConnected(cluster);
+      const ss = await client
+        .db("admin")
+        .command({ serverStatus: 1, catalogStats: 1 });
+      const cs = ss?.catalogStats || null;
+      if (cs) {
+        catalogStats = {
+          collections: cs.collections || 0,
+          views: cs.views || 0,
+          clustered: cs.clustered || 0,
+          timeseries: cs.timeseries || 0,
+          internalCollections: cs.internalCollections || 0,
+          total: cs.total || (cs.collections || 0) + (cs.views || 0),
+        };
+        catalogTooLarge = (cs.collections || 0) > CATALOG_TOO_LARGE_THRESHOLD;
+      }
+
+      // buildInfo is cheap and cluster-wide, so we always run it (regardless of catalog size).
+      try {
+        const bi = await client.db("admin").command({ buildInfo: 1 });
+        serverVersion = bi?.version || null;
+        serverVersionArray = Array.isArray(bi?.versionArray) ? bi.versionArray : null;
+        queryStatsSupported = supportsQueryStats(serverVersionArray);
+      } catch (err) {
+        console.warn(`[discovery] ${cluster.name}: buildInfo failed (${err.message})`);
+      }
+
+      if (!catalogTooLarge) {
+        const dbList = await client
+          .db("admin")
+          .command({ listDatabases: 1, nameOnly: true });
+        databases = (dbList?.databases || [])
+          .map((d) => d?.name)
+          .filter((name) => name && !isHiddenTopLevelDb(name))
+          .sort();
+      } else {
+        console.warn(
+          `[discovery] ${cluster.name}: catalogStats.collections=${cs.collections} > ${CATALOG_TOO_LARGE_THRESHOLD} — skipping listDatabases and per-collection scans`,
+        );
+      }
+    } catch (err) {
+      catalogError = err.message;
+      console.warn(
+        `[discovery] ${cluster.name}: catalog scan failed (${err.message})`,
+      );
+    }
+  }
+
   const topology = {
     clusterId: cluster._id,
     clusterName: cluster.name,
@@ -112,14 +193,26 @@ async function discoverOne(cluster) {
     uriPrefix: uriPrefix || null,
     helloOk: !helloError,
     helloError: helloError ? helloError.message : null,
+    catalogStats,
+    catalogTooLarge,
+    catalogError,
+    catalogThreshold: CATALOG_TOO_LARGE_THRESHOLD,
+    databases,
+    serverVersion,
+    serverVersionArray,
+    queryStatsSupported,
+    queryStatsMinVersion: `${QUERY_STATS_MIN_MAJOR}.0+`,
   };
 
   await getDb()
     .collection(TOPOLOGIES)
     .updateOne({ clusterId: cluster._id }, { $set: topology }, { upsert: true });
 
+  const catalogSummary = catalogStats
+    ? ` catalog=${catalogStats.collections} collections${catalogTooLarge ? " (TOO LARGE — skipping per-collection scans)" : ""}`
+    : "";
   console.log(
-    `Discovered ${cluster.name}: ${topology.hosts.length} members, primary=${topology.primary}${helloError ? " (SRV-only, hello auth failed)" : ""}`,
+    `Discovered ${cluster.name}: ${topology.hosts.length} members, primary=${topology.primary}${helloError ? " (SRV-only, hello auth failed)" : ""}${catalogSummary} dbs=${databases.length}`,
   );
   await logMonitorEvent({
     source: "discovery",
@@ -130,8 +223,15 @@ async function discoverOne(cluster) {
     targetCollection: TOPOLOGIES,
     detail: helloError
       ? `SRV-only: ${topology.hosts.length} hosts (hello failed: ${helloError.message})`
-      : `upsert topology: ${topology.hosts.length} hosts, primary=${topology.primary || "—"}`,
-    meta: { hostCount: topology.hosts.length, primary: topology.primary || null, helloOk: !helloError },
+      : `upsert topology: ${topology.hosts.length} hosts, primary=${topology.primary || "—"}, dbs=${databases.length}${catalogSummary}`,
+    meta: {
+      hostCount: topology.hosts.length,
+      primary: topology.primary || null,
+      helloOk: !helloError,
+      catalogStats: catalogStats || undefined,
+      catalogTooLarge: catalogTooLarge || undefined,
+      databaseCount: databases.length,
+    },
   });
   return topology;
 }
