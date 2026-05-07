@@ -21,10 +21,16 @@ const POLL_INTERVAL_LOGS = 5 * 60 * 1000;
 const POLL_INTERVAL_INDEXES = 10 * 60 * 1000;
 const STORAGE_HOUR = 3; // run storage scan daily at 3 AM local time
 
-/** Rolling lookback for Performance Advisor slowQueryLogs. Fixed window avoids the shrinking-window bug. */
-const SLOW_QUERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
-/** Extra overlap so boundary events (clock skew, Atlas log delay) are not missed. */
-const SLOW_QUERY_OVERLAP_MS = 6 * 60 * 1000;
+/**
+ * Per-host watermark drives `since` for Performance Advisor `slowQueryLogs`. Each poll asks Atlas for
+ * `[max(latestStoredTimestamp - SAFETY_LAG, now - MAX_LOOKBACK), now]` so steady-state duplicates are
+ * just the tiny safety lag (≈ SAFETY_LAG / poll_interval). MAX_LOOKBACK is a hard floor so a long
+ * outage doesn't trigger an unbounded fetch.
+ */
+const SLOW_QUERY_SAFETY_LAG_MS =
+  Number.parseInt(process.env.SLOW_QUERY_SAFETY_LAG_MS, 10) || 60 * 1000; // 1 min
+const SLOW_QUERY_MAX_LOOKBACK_MS =
+  Number.parseInt(process.env.SLOW_QUERY_MAX_LOOKBACK_MS, 10) || 30 * 60 * 1000; // 30 min
 
 // ─── $queryStats collector ──────────────────────────────────────────
 
@@ -175,6 +181,11 @@ function truncatedFromLog(log) {
   return undefined;
 }
 
+/**
+ * Slow-query rows are immutable events. Use `$setOnInsert` so duplicates from window overlap don't
+ * re-`$set` identical fields — match-only ops do nothing on the server beyond the index probe.
+ * `ordered: false` is the last-line safety net for the rare race that gets past dedupe.
+ */
 async function bulkUpsertSlowQueries(withNumericId, withoutNumericId) {
   const coll = getDb().collection(SLOW_QUERIES);
   for (let i = 0; i < withNumericId.length; i += SLOW_QUERY_UPSERT_CHUNK) {
@@ -189,7 +200,7 @@ async function bulkUpsertSlowQueries(withNumericId, withoutNumericId) {
           millis: doc.millis,
           ctx: doc.ctx,
         },
-        update: { $set: doc },
+        update: { $setOnInsert: doc },
         upsert: true,
       },
     }));
@@ -198,6 +209,18 @@ async function bulkUpsertSlowQueries(withNumericId, withoutNumericId) {
   if (withoutNumericId.length) {
     await coll.insertMany(withoutNumericId, { ordered: false });
   }
+}
+
+/** Latest stored slow-query `timestamp` for `(clusterId, host)`. Backed by the
+ *  `slow_queries_cluster_host_time` index for O(log n). Returns null when no rows yet. */
+async function getSlowQueryWatermark(clusterId, host) {
+  const row = await getDb()
+    .collection(SLOW_QUERIES)
+    .find({ clusterId, host }, { projection: { _id: 0, timestamp: 1 } })
+    .sort({ timestamp: -1 })
+    .limit(1)
+    .next();
+  return row && row.timestamp instanceof Date ? row.timestamp : null;
 }
 
 async function collectQueryStatsForHost(cluster, host) {
@@ -318,12 +341,12 @@ async function collectQueryStatsAll() {
       console.log(`[queryStats] ${cluster.name}: skipped (isPolling=false)`);
       continue;
     }
-    // Server-version gate: $queryStats is only available on MongoDB 7.0+. Skip cleanly when
+    // Server-version gate: $queryStats per manual from MongoDB 7.1+. Skip cleanly when
     // the topology has marked it unsupported so we don't spam logs every 5 minutes.
     const topology = await getDb().collection("topologies").findOne({ clusterId: cluster._id });
     if (topology && topology.queryStatsSupported === false) {
       console.log(
-        `[queryStats] ${cluster.name}: skipped — MongoDB ${topology.serverVersion || "<unknown>"} (requires ${topology.queryStatsMinVersion || "7.0"}+)`,
+        `[queryStats] ${cluster.name}: skipped — MongoDB ${topology.serverVersion || "<unknown>"} (requires ${topology.queryStatsMinVersion || "7.1"}+)`,
       );
       await logMonitorEvent({
         action: "queryStats.collect",
@@ -331,7 +354,7 @@ async function collectQueryStatsAll() {
         clusterId: cluster._id,
         clusterName: cluster.name,
         targetCollection: QUERY_STATS,
-        detail: `skipped: server version ${topology.serverVersion || "unknown"} is below ${topology.queryStatsMinVersion || "7.0"}`,
+        detail: `skipped: server version ${topology.serverVersion || "unknown"} is below ${topology.queryStatsMinVersion || "7.1"}`,
         meta: { serverVersion: topology.serverVersion || null },
       });
       continue;
@@ -546,22 +569,32 @@ async function collectSlowQueries(cluster) {
   }
 
   const nowMs = Date.now();
-  const sinceMs = nowMs - SLOW_QUERY_LOOKBACK_MS - SLOW_QUERY_OVERLAP_MS;
-  const durationMs = nowMs - sinceMs;
   const now = new Date();
   const allDocs = [];
 
   for (const host of processTargets) {
     try {
+      const topologyHost = processIdToTopologyHost.get(host) || host;
+      const watermark = await getSlowQueryWatermark(cluster._id, topologyHost);
+      const wmMs = watermark ? watermark.getTime() : null;
+      const floorMs = nowMs - SLOW_QUERY_MAX_LOOKBACK_MS;
+      const sinceMs = wmMs != null ? Math.max(wmMs - SLOW_QUERY_SAFETY_LAG_MS, floorMs) : floorMs;
+      const durationMs = nowMs - sinceMs;
+      const sinceSource = wmMs == null
+        ? "first-run"
+        : wmMs - SLOW_QUERY_SAFETY_LAG_MS < floorMs
+          ? "lookback-cap"
+          : "watermark";
+
       const url = new URL(
         `https://cloud.mongodb.com/api/atlas/v2/groups/${projectId}/processes/${encodeURIComponent(host)}/performanceAdvisor/slowQueryLogs`,
       );
       url.searchParams.set("since", String(sinceMs));
       url.searchParams.set("duration", String(durationMs));
-      url.searchParams.set("nLogs", "2000");
+      url.searchParams.set("nLogs", "5000");
 
       console.log(
-        `[slowQueries] ${cluster.name} host=${host} sinceISO=${new Date(sinceMs).toISOString()} durationH=${(durationMs / 3600000).toFixed(2)}`,
+        `[slowQueries] ${cluster.name} host=${host} sinceISO=${new Date(sinceMs).toISOString()} durationMin=${(durationMs / 60000).toFixed(1)} via=${sinceSource}`,
       );
 
       const resp = await digestFetch(url.toString(), publicKey, privateKey);

@@ -149,7 +149,7 @@
           (<span class="qs-unsupported-version">—</span>).
           This chart sources data from the
           <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener"><code>$queryStats</code></a>
-          aggregation stage, which requires <strong>MongoDB 8.0 or later</strong>.
+          aggregation stage. Starting in MongoDB 7.1, the <code>$queryStats</code> stage returns statistics for recorded queries (<a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">manual</a>). These charts run when the deployment is <strong>7.1 or later</strong>.
         </div>
       </div>
     </section>
@@ -170,7 +170,7 @@
           (<span class="qs-unsupported-version">—</span>).
           This chart sources data from the
           <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener"><code>$queryStats</code></a>
-          aggregation stage, which requires <strong>MongoDB 8.0 or later</strong>.
+          aggregation stage. Starting in MongoDB 7.1, the <code>$queryStats</code> stage returns statistics for recorded queries (<a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">manual</a>). These charts run when the deployment is <strong>7.1 or later</strong>.
         </div>
       </div>
     </section>
@@ -191,7 +191,7 @@
           (<span class="qs-unsupported-version">—</span>).
           This chart sources data from the
           <a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener"><code>$queryStats</code></a>
-          aggregation stage, which requires <strong>MongoDB 8.0 or later</strong>.
+          aggregation stage. Starting in MongoDB 7.1, the <code>$queryStats</code> stage returns statistics for recorded queries (<a href="https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/" target="_blank" rel="noopener">manual</a>). These charts run when the deployment is <strong>7.1 or later</strong>.
         </div>
       </div>
     </section>
@@ -387,6 +387,21 @@
         </div>
         <div id="explainClusterWarn" class="explain-cluster-warn" hidden role="alert">
           Pick a target cluster before running <code>explain</code>.
+        </div>
+
+        <div id="explainTruncatedWarn" class="explain-truncated-warn" hidden role="alert" aria-live="polite">
+          <div class="explain-truncated-warn-title">
+            <span class="explain-truncated-warn-badge">TRUNCATED</span>
+            Source slow-query log was truncated
+          </div>
+          <p class="explain-truncated-warn-text">
+            MongoDB clipped this slow-op log line, so the captured <code>command</code> body is incomplete
+            (filter clauses or pipeline stages may be missing). Re-running it here against another cluster
+            would test a <strong>different query shape</strong> from the one that ran in production.
+            <br />
+            Open the full query in <a href="https://www.mongodb.com/docs/compass/" target="_blank" rel="noopener">MongoDB Compass</a>
+            (or your application source) and run <code>explain("executionStats")</code> manually there.
+          </p>
         </div>
 
         <div id="explainProdWarn" class="explain-prod-warn" hidden role="alert" aria-live="polite">

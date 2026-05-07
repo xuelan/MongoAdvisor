@@ -27,6 +27,13 @@ const INDEXES = [
     },
   },
   {
+    /** Backs the per-host watermark lookup (find({clusterId,host}).sort({timestamp:-1}).limit(1))
+     *  used by the slow-query collector to size the Atlas `since` parameter. */
+    coll: "slow_queries",
+    keys: { clusterId: 1, host: 1, timestamp: -1 },
+    options: { name: "slow_queries_cluster_host_time" },
+  },
+  {
     coll: "topologies",
     keys: { clusterId: 1 },
     options: { unique: true, name: "uniq_topology_per_cluster" },

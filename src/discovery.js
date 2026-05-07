@@ -14,18 +14,20 @@ const CLUSTERS = "clusters";
  *  See https://www.mongodb.com/docs/manual/data-modeling/design-antipatterns/reduce-collections/ */
 const CATALOG_TOO_LARGE_THRESHOLD = 10_000;
 
-/** $queryStats was introduced in MongoDB 7.0 but required a non-default
- *  `internalQueryStatsRateLimit` parameter to actually emit any data. From 8.0+ it ships with
- *  sane defaults, so we only consider 8.0+ as truly "supported" for this dashboard.
+/** Per MongoDB manual, the `$queryStats` stage returns statistics for recorded queries starting in 7.1.
  *  See https://www.mongodb.com/docs/manual/reference/operator/aggregation/queryStats/ */
-const QUERY_STATS_MIN_MAJOR = 8;
+const QUERY_STATS_MIN_MAJOR = 7;
+const QUERY_STATS_MIN_MINOR = 1;
 
-/** True when [major, minor, patch] >= [QUERY_STATS_MIN_MAJOR, 0, 0]. */
+/** True when versionArray is at least [QUERY_STATS_MIN_MAJOR, QUERY_STATS_MIN_MINOR, 0]. */
 function supportsQueryStats(versionArray) {
   if (!Array.isArray(versionArray) || versionArray.length === 0) return null;
   const major = Number(versionArray[0]);
-  if (!Number.isFinite(major)) return null;
-  return major >= QUERY_STATS_MIN_MAJOR;
+  const minor = Number(versionArray[1] ?? 0);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
+  if (major > QUERY_STATS_MIN_MAJOR) return true;
+  if (major < QUERY_STATS_MIN_MAJOR) return false;
+  return minor >= QUERY_STATS_MIN_MINOR;
 }
 
 function decryptUri(uri) {
@@ -122,7 +124,7 @@ async function discoverOne(cluster) {
   // Step 3: When the live connection works, fetch catalog stats + database list + buildInfo.
   // - serverStatus.catalogStats.collections gates per-collection scans (storage / indexStats).
   // - listDatabases populates the topology.databases used by the UI Databases filter.
-  // - buildInfo.versionArray gates $queryStats (introduced in MongoDB 7.0).
+  // - buildInfo.versionArray gates $queryStats (manual: stage from MongoDB 7.1+).
   let catalogStats = null;
   let catalogTooLarge = false;
   let catalogError = null;
@@ -201,7 +203,7 @@ async function discoverOne(cluster) {
     serverVersion,
     serverVersionArray,
     queryStatsSupported,
-    queryStatsMinVersion: `${QUERY_STATS_MIN_MAJOR}.0+`,
+    queryStatsMinVersion: `${QUERY_STATS_MIN_MAJOR}.${QUERY_STATS_MIN_MINOR}+`,
   };
 
   await getDb()

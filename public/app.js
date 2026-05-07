@@ -337,8 +337,8 @@ function hostSelectNone() {
 // ─── Metrics ────────────────────────────────────────────────────────
 
 /** Toggle the per-card "$queryStats not available" notice on the three queryStats-driven
- *  cards (Execution Count, Total Time, Slowest by AppName). When the cluster's MongoDB
- *  version is below the supported threshold we hide the canvas and show the message in place. */
+ *  cards (Execution Count, Total Time, Slowest by AppName). When the cluster is below 7.1
+ *  (manual minimum for `$queryStats`) we hide the canvas and show the message in place. */
 function updateQueryStatsUnsupportedBanner() {
   const cid = getDashboardClusterId();
   const t = cid ? topologyMap[cid] : null;
@@ -1569,6 +1569,13 @@ let explainCurrent = null;
 let explainCommandBody = null;
 /** Namespace resolved from the slow-query sample (falls back to the tile's namespace). */
 let explainNamespaceResolved = null;
+/**
+ * True when the slow-query log line was truncated by MongoDB (either the structured `truncated`
+ * field is present or a `$truncated` placeholder is found anywhere in the captured command body).
+ * When set, the captured command can't be re-run reliably on a target cluster — the modal disables
+ * Run and tells the user to test the full query in MongoDB Compass instead.
+ */
+let explainSourceTruncated = false;
 
 /** Look up the selected explain target cluster object (or null). */
 function getExplainSelectedCluster() {
@@ -1603,9 +1610,12 @@ function setExplainRunEnabled() {
     && !!confirmName && confirmName.value.trim() === cluster.name
   );
 
-  btn.disabled = !(hasCluster && hasCommand && hasNs && prodConfirmed);
+  // Truncated source logs override every other state — re-running an incomplete command on a
+  // different cluster would explain a different shape from the one that ran in production.
+  btn.disabled = explainSourceTruncated || !(hasCluster && hasCommand && hasNs && prodConfirmed);
   if (btn.disabled) {
-    if (!hasCommand) btn.title = "Waiting for the query body to load";
+    if (explainSourceTruncated) btn.title = "Source slow-query log was truncated — run the full query in MongoDB Compass instead";
+    else if (!hasCommand) btn.title = "Waiting for the query body to load";
     else if (!hasNs) btn.title = "Query namespace could not be determined";
     else if (!hasCluster) btn.title = "Pick a target cluster first";
     else if (isProd && !prodConfirmed) btn.title = "Confirm the production warning before running";
@@ -1656,6 +1666,7 @@ function openExplainModal(ctx) {
   };
   explainCommandBody = null;
   explainNamespaceResolved = ctx?.namespace || null;
+  explainSourceTruncated = false;
 
   document.getElementById("explainAppName").textContent = explainCurrent.appName || "(no appName)";
   document.getElementById("explainComment").textContent = explainCurrent.comment || "(no comment)";
@@ -1674,6 +1685,8 @@ function openExplainModal(ctx) {
   document.getElementById("explainError").textContent = "";
   const warn = document.getElementById("explainClusterWarn");
   if (warn) warn.hidden = true;
+  const truncWarn = document.getElementById("explainTruncatedWarn");
+  if (truncWarn) truncWarn.hidden = true;
   const prodWarn = document.getElementById("explainProdWarn");
   if (prodWarn) prodWarn.hidden = true;
   const confirmCk = document.getElementById("explainConfirmProd");
@@ -1700,6 +1713,33 @@ function closeExplainModal() {
   modal.setAttribute("aria-hidden", "true");
   document.body.style.overflow = "";
   explainCurrent = null;
+}
+
+/**
+ * Detect MongoDB log truncation in a slow-query sample doc. Returns true when either:
+ *  - the log carried a structured `truncated` object / a legacy boolean true, or
+ *  - any captured `command` / `originatingCommand` value contains the `$truncated` placeholder
+ *    that mongod inserts when an attribute exceeds `maxLogSizeKB`.
+ *  See https://www.mongodb.com/docs/manual/reference/log-messages/
+ */
+function isSlowQueryLogTruncated(doc) {
+  if (!doc || typeof doc !== "object") return false;
+  const t = doc.truncated;
+  if (t === true) return true;
+  if (t && typeof t === "object" && Object.keys(t).length > 0) return true;
+  return commandContainsTruncationMarker(doc.command) || commandContainsTruncationMarker(doc.originatingCommand);
+}
+
+/** Recursively look for a `$truncated` key (any depth) — that's how mongod marks elided values. */
+function commandContainsTruncationMarker(node, depth = 0) {
+  if (depth > 8 || node == null) return false;
+  if (Array.isArray(node)) return node.some((v) => commandContainsTruncationMarker(v, depth + 1));
+  if (typeof node !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(node, "$truncated")) return true;
+  for (const v of Object.values(node)) {
+    if (commandContainsTruncationMarker(v, depth + 1)) return true;
+  }
+  return false;
 }
 
 async function loadExplainQueryBody() {
@@ -1762,10 +1802,18 @@ async function loadExplainQueryBody() {
         ? doc.raw
         : "(No command body captured on this slow-query log line.)";
     }
+
+    explainSourceTruncated = isSlowQueryLogTruncated(doc);
+    const truncWarn = document.getElementById("explainTruncatedWarn");
+    if (truncWarn) truncWarn.hidden = !explainSourceTruncated;
+
     setExplainRunEnabled();
   } catch (err) {
     pre.textContent = `Network error: ${err.message || err}`;
     explainCommandBody = null;
+    explainSourceTruncated = false;
+    const truncWarn = document.getElementById("explainTruncatedWarn");
+    if (truncWarn) truncWarn.hidden = true;
     setExplainRunEnabled();
   }
 }

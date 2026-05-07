@@ -154,7 +154,7 @@ main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
 .topo-catalog-warn { font-size: 0.7rem; color: #ffd93d; padding: 0.1rem 0.4rem; background: rgba(255, 217, 61, 0.12); border: 1px solid rgba(255, 217, 61, 0.35); border-radius: 4px; }
 
 /* Per-card "$queryStats not available" message shown in place of the chart canvas
- * when the target cluster's MongoDB version is below the supported threshold (8.0+). */
+ * when the target cluster's MongoDB version is below the supported threshold (7.1+ per manual). */
 .qs-card .qs-canvas[hidden] { display: none !important; }
 .qs-unsupported-card-msg {
   display: flex;
@@ -663,6 +663,41 @@ form.add-cluster input.full { grid-column: 1 / -1; }
   border-color: rgba(255, 217, 61, 0.6);
   box-shadow: 0 0 0 1px rgba(255, 217, 61, 0.25);
 }
+
+/* ─── Truncated source-log warning (cannot reliably re-run on another cluster) ─── */
+.explain-truncated-warn {
+  margin: 0.4rem 0 0.7rem;
+  padding: 0.75rem 0.9rem;
+  background: rgba(255, 165, 0, 0.08);
+  border: 1px solid rgba(255, 165, 0, 0.5);
+  border-radius: 6px;
+  color: #ffc187;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.explain-truncated-warn[hidden] { display: none !important; }
+.explain-truncated-warn-title { display: flex; align-items: center; gap: 0.55rem; font-weight: 600; color: #ffb066; font-size: 0.9rem; }
+.explain-truncated-warn-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: #ff9933;
+  color: #1f1209;
+}
+.explain-truncated-warn-text { margin: 0; color: #ffc187; }
+.explain-truncated-warn-text code {
+  background: rgba(255, 165, 0, 0.18);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  color: #ffc187;
+}
+.explain-truncated-warn-text a { color: #ffd29a; text-decoration: underline; }
 
 /* ─── Production explain warning ─── */
 .explain-prod-warn {
