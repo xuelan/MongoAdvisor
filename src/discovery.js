@@ -52,7 +52,7 @@ async function resolveSrvHosts(uri) {
 
 /**
  * Extract the shard-number suffix from an Atlas hostname.
- * e.g. "mongomonitor-shard-00-01.ljwx2.mongodb.net:27017" → "shard-00-01"
+ * e.g. "<cluster>-shard-00-01.<tenant>.mongodb.net:27017" → "shard-00-01"
  */
 function shardSuffix(host) {
   const m = host && host.match(/(shard-\d+-\d+)/);
@@ -273,4 +273,9 @@ async function discoverAll() {
   return results;
 }
 
-module.exports = { discoverOne, discoverAll };
+module.exports = {
+  discoverOne,
+  discoverAll,
+  // Exported for unit testing — keep stable.
+  _internal: { supportsQueryStats, QUERY_STATS_MIN_MAJOR, QUERY_STATS_MIN_MINOR },
+};

@@ -851,6 +851,21 @@ form.add-cluster input.full { grid-column: 1 / -1; }
   outline: 1px solid rgba(0, 237, 100, 0.35);
   outline-offset: -1px;
 }
+.explain-stages-table tbody tr.is-slowest {
+  background: rgba(255, 107, 107, 0.08);
+  box-shadow: inset 3px 0 0 #ff6b6b;
+}
+.explain-stages-table tbody tr.is-slowest .esc-label::after {
+  content: " ◀ slowest";
+  color: #ff6b6b;
+  font-family: inherit;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  margin-left: 0.5rem;
+}
+.explain-stages-table tbody tr.is-slowest.is-selected {
+  background: rgba(255, 107, 107, 0.12);
+}
 .explain-stages-table tbody tr:last-child td { border-bottom: none; }
 .explain-stages-table .esc-num { width: 3rem; color: #8899a6; font-family: monospace; }
 .explain-stages-table .esc-label { font-family: monospace; color: #cfe4ff; }

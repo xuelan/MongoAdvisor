@@ -3,6 +3,7 @@ const { ObjectId } = require("mongodb");
 const { getDb } = require("../db");
 const { isHiddenTopLevelDb } = require("../hidden-dbs");
 const { MONITOR_LOGS } = require("../monitor-log");
+const { rawHotCutoff, COLLECTIONS: RC } = require("../retention");
 
 const router = Router();
 
@@ -56,6 +57,137 @@ function buildFilter(query, { includeHost = true } = {}) {
     filter.host = hosts.length === 1 ? hosts[0] : { $in: hosts };
   }
   return filter;
+}
+
+/**
+ * Build a pipeline prefix that unions raw rows with hourly rollups when the
+ * requested `since` predates the raw retention cutoff. Fast path (no $unionWith)
+ * when the time range fits entirely in the raw hot window.
+ *
+ * The rollup branch projects bucketStart → timestamp and aliases pre-aggregated
+ * fields back to the raw column names so downstream $group/$sum/$avg stages work
+ * unchanged. Pre-summed fields (execCount, totalExecMicros, …) compose correctly:
+ * Σ(hourly deltas) across the range == Σ(raw deltas) over the same range.
+ *
+ * Three cases:
+ *   1. `since` is in the raw hot window (`since >= cutoff`) → raw only.
+ *   2. `since` predates the cutoff → raw `[cutoff, now]` ∪ rollup `[since, cutoff)`.
+ *   3. `since` is undefined (the "All" UI filter) → raw `[cutoff, now]` ∪ rollup `(-∞, cutoff)`
+ *      so the long-term hourly history is included instead of silently capped at RAW_TTL_DAYS.
+ */
+function buildQueryStatsPipelinePrefix(matchFilter) {
+  const since = matchFilter.timestamp?.$gte;
+  const cutoff = rawHotCutoff();
+  if (since && since >= cutoff) {
+    return [{ $match: matchFilter }];
+  }
+
+  // Raw covers [cutoff, now]; rollup covers [since ?? -∞, cutoff)
+  const rawMatch = { ...matchFilter, timestamp: { $gte: cutoff } };
+  const rollupMatch = { ...matchFilter };
+  delete rollupMatch.timestamp;
+  rollupMatch.bucketStart = since ? { $gte: since, $lt: cutoff } : { $lt: cutoff };
+
+  return [
+    { $match: rawMatch },
+    {
+      $unionWith: {
+        coll: RC.QUERY_STATS_HOURLY,
+        pipeline: [
+          { $match: rollupMatch },
+          {
+            $project: {
+              timestamp: "$bucketStart",
+              clusterId: 1,
+              clusterName: 1,
+              host: 1,
+              appName: 1,
+              namespace: 1,
+              queryShapeHash: 1,
+              comment: 1,
+              execCount: 1,
+              totalExecMicros: 1,
+              docsExamined: 1,
+              keysExamined: 1,
+              firstResponseExecMicros: 1,
+              queryShape: "$queryShapeSample",
+              lastExecutionMicros: "$lastExecutionMicrosMax",
+            },
+          },
+        ],
+      },
+    },
+  ];
+}
+
+/**
+ * Same idea for slow_queries. Each row coming out of the union carries a
+ * `_weight` field (1 for raw, $count for rollup) plus `_total*` pre-aggregated
+ * fields. Downstream pipelines should use:
+ *   { $sum: "$_weight" }                  instead of { $sum: 1 }
+ *   { $sum: { $ifNull:["$_totalMillis", "$millis"]} }   for cross-tier sums
+ *   { $max: { $ifNull:["$_maxMillis", "$millis"]} }     for cross-tier max
+ * Averages must be recomputed after $group as totalMillis / count to stay
+ * correct across mixed weights. See /heatmap and /bubble for the pattern.
+ */
+function buildSlowQueriesPipelinePrefix(matchFilter) {
+  const since = matchFilter.timestamp?.$gte;
+  const cutoff = rawHotCutoff();
+
+  const tagRawWeight = {
+    $addFields: {
+      _weight: 1,
+      _totalMillis: "$millis",
+      _maxMillis: "$millis",
+      _totalCpuNanos: { $ifNull: ["$cpuNanos", 0] },
+      _totalBytesRead: { $ifNull: ["$bytesRead", 0] },
+      _totalDocsExamined: { $ifNull: ["$docsExamined", 0] },
+      _totalKeysExamined: { $ifNull: ["$keysExamined", 0] },
+    },
+  };
+
+  if (since && since >= cutoff) {
+    return [{ $match: matchFilter }, tagRawWeight];
+  }
+
+  const rawMatch = { ...matchFilter, timestamp: { $gte: cutoff } };
+  const rollupMatch = { ...matchFilter };
+  delete rollupMatch.timestamp;
+  rollupMatch.bucketStart = since ? { $gte: since, $lt: cutoff } : { $lt: cutoff };
+
+  return [
+    { $match: rawMatch },
+    tagRawWeight,
+    {
+      $unionWith: {
+        coll: RC.SLOW_QUERIES_HOURLY,
+        pipeline: [
+          { $match: rollupMatch },
+          {
+            $project: {
+              timestamp: "$bucketStart",
+              clusterId: 1,
+              clusterName: 1,
+              host: 1,
+              appName: 1,
+              namespace: 1,
+              comment: 1,
+              queryHash: 1,
+              planSummary: 1,
+              _weight: "$count",
+              _totalMillis: "$totalMillis",
+              _maxMillis: "$maxMillis",
+              _totalCpuNanos: "$totalCpuNanos",
+              _totalBytesRead: "$totalBytesRead",
+              _totalDocsExamined: "$totalDocsExamined",
+              _totalKeysExamined: "$totalKeysExamined",
+              millis: "$avgMillis",  // single representative for any downstream code that still uses $millis
+            },
+          },
+        ],
+      },
+    },
+  ];
 }
 
 // GET /api/metrics/namespaces -- distinct namespaces for filter dropdown (?clusterId=)
@@ -133,12 +265,11 @@ router.get("/hosts", async (req, res, next) => {
 router.get("/query-stats", async (req, res, next) => {
   try {
     const filter = matchExcludeSystemAppName(buildFilter(req.query));
+    const prefix = buildQueryStatsPipelinePrefix(filter);
 
     const docs = await getDb()
       .collection("query_stats")
-      .find(filter)
-      .sort({ timestamp: -1 })
-      .limit(1000)
+      .aggregate([...prefix, { $sort: { timestamp: -1 } }, { $limit: 1000 }])
       .toArray();
 
     res.json(docs);
@@ -148,17 +279,58 @@ router.get("/query-stats", async (req, res, next) => {
 });
 
 // GET /api/metrics/slow-queries?clusterId=X&since=ISO&namespace=db.coll
+//
+// Returns raw slow-query events (with command bodies) when the time range is
+// inside the raw retention window. Older ranges return rollup exemplars
+// projected to look like raw rows so the UI can keep rendering — note these
+// won't have id/raw/originatingCommand for events older than RETENTION_RAW_DAYS.
 router.get("/slow-queries", async (req, res, next) => {
   try {
     const filter = matchExcludeSystemAppName(buildFilter(req.query));
+    const since = filter.timestamp?.$gte;
+    const cutoff = rawHotCutoff();
 
-    const docs = await getDb()
-      .collection("slow_queries")
-      .find(filter)
-      .sort({ timestamp: -1 })
-      .limit(500)
-      .toArray();
+    if (since && since >= cutoff) {
+      const docs = await getDb()
+        .collection("slow_queries")
+        .find(filter).sort({ timestamp: -1 }).limit(500).toArray();
+      return res.json(docs);
+    }
 
+    // Hybrid: take recent raw + older rollup exemplars projected to raw-ish shape.
+    // When `since` is undefined (the "All" filter), the rollup branch covers all
+    // history before `cutoff`, so old TTL-purged events still appear via the exemplar.
+    const rawMatch = { ...filter, timestamp: { $gte: cutoff } };
+    const rollupMatch = { ...filter };
+    delete rollupMatch.timestamp;
+    rollupMatch.bucketStart = since ? { $gte: since, $lt: cutoff } : { $lt: cutoff };
+
+    const docs = await getDb().collection("slow_queries").aggregate([
+      { $match: rawMatch },
+      {
+        $unionWith: {
+          coll: RC.SLOW_QUERIES_HOURLY,
+          pipeline: [
+            { $match: rollupMatch },
+            {
+              $project: {
+                timestamp: "$exemplar.timestamp",
+                clusterId: 1, clusterName: 1, host: 1,
+                appName: 1, namespace: 1, comment: 1,
+                queryHash: 1, planSummary: 1,
+                millis: "$exemplar.millis",
+                command: "$exemplar.command",
+                originatingCommand: "$exemplar.originatingCommand",
+                raw: "$exemplar.raw",
+                _fromRollup: { $literal: true },
+              },
+            },
+          ],
+        },
+      },
+      { $sort: { timestamp: -1 } },
+      { $limit: 500 },
+    ]).toArray();
     res.json(docs);
   } catch (err) {
     next(err);
@@ -171,7 +343,7 @@ router.get("/app-load", async (req, res, next) => {
     const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
-      { $match: matchStage },
+      ...buildQueryStatsPipelinePrefix(matchStage),
       { $sort: { timestamp: -1 } },
       {
         $group: {
@@ -214,7 +386,7 @@ router.get("/app-analysis", async (req, res, next) => {
     const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
-      { $match: matchStage },
+      ...buildQueryStatsPipelinePrefix(matchStage),
       {
         $group: {
           _id: {
@@ -395,7 +567,7 @@ router.get("/impact-by-query", async (req, res, next) => {
     const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
-      { $match: matchStage },
+      ...buildQueryStatsPipelinePrefix(matchStage),
       {
         $group: {
           _id: { appName: "$appName", queryShapeHash: "$queryShapeHash" },
@@ -433,28 +605,34 @@ router.get("/impact-by-query", async (req, res, next) => {
 });
 
 // GET /api/metrics/heatmap?clusterId=X&namespace=db.coll&since=ISO
-// Sourced from slow_queries (Atlas Logs API): cpuNanos for CPU, bytesRead for IO
+// Sourced from slow_queries (Atlas Logs API): cpuNanos for CPU, bytesRead for IO.
+// When `since` predates RETENTION_RAW_DAYS, the older slice is served from the
+// hourly rollup via buildSlowQueriesPipelinePrefix (_weight = pre-summed count).
 router.get("/heatmap", async (req, res, next) => {
   try {
     const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
-      { $match: matchStage },
+      ...buildSlowQueriesPipelinePrefix(matchStage),
       {
         $group: {
           _id: { appName: "$appName", comment: "$comment" },
           namespaces: { $addToSet: "$namespace" },
-          count: { $sum: 1 },
-          totalCpuNanos: { $sum: { $ifNull: ["$cpuNanos", 0] } },
-          avgCpuNanos: { $avg: { $ifNull: ["$cpuNanos", 0] } },
-          totalBytesRead: { $sum: { $ifNull: ["$bytesRead", 0] } },
-          avgBytesRead: { $avg: { $ifNull: ["$bytesRead", 0] } },
-          totalMillis: { $sum: "$millis" },
-          avgMillis: { $avg: "$millis" },
-          maxMillis: { $max: "$millis" },
-          totalDocsExamined: { $sum: "$docsExamined" },
-          totalKeysExamined: { $sum: "$keysExamined" },
+          count: { $sum: "$_weight" },
+          totalCpuNanos: { $sum: "$_totalCpuNanos" },
+          totalBytesRead: { $sum: "$_totalBytesRead" },
+          totalMillis: { $sum: "$_totalMillis" },
+          maxMillis: { $max: "$_maxMillis" },
+          totalDocsExamined: { $sum: "$_totalDocsExamined" },
+          totalKeysExamined: { $sum: "$_totalKeysExamined" },
           planSummaries: { $addToSet: "$planSummary" },
+        },
+      },
+      {
+        $addFields: {
+          avgCpuNanos: { $cond: [{ $gt: ["$count", 0] }, { $divide: ["$totalCpuNanos", "$count"] }, 0] },
+          avgBytesRead: { $cond: [{ $gt: ["$count", 0] }, { $divide: ["$totalBytesRead", "$count"] }, 0] },
+          avgMillis: { $cond: [{ $gt: ["$count", 0] }, { $divide: ["$totalMillis", "$count"] }, 0] },
         },
       },
       {
@@ -494,20 +672,24 @@ router.get("/bubble", async (req, res, next) => {
     const matchStage = matchExcludeSystemAppName(buildFilter(req.query));
 
     const pipeline = [
-      { $match: matchStage },
+      ...buildSlowQueriesPipelinePrefix(matchStage),
       {
         $group: {
           _id: { appName: "$appName", comment: "$comment" },
-          count: { $sum: 1 },
-          totalMillis: { $sum: "$millis" },
-          avgMillis: { $avg: "$millis" },
-          maxMillis: { $max: "$millis" },
-          totalCpuNanos: { $sum: { $ifNull: ["$cpuNanos", 0] } },
-          totalBytesRead: { $sum: { $ifNull: ["$bytesRead", 0] } },
-          totalDocsExamined: { $sum: "$docsExamined" },
-          totalKeysExamined: { $sum: "$keysExamined" },
+          count: { $sum: "$_weight" },
+          totalMillis: { $sum: "$_totalMillis" },
+          maxMillis: { $max: "$_maxMillis" },
+          totalCpuNanos: { $sum: "$_totalCpuNanos" },
+          totalBytesRead: { $sum: "$_totalBytesRead" },
+          totalDocsExamined: { $sum: "$_totalDocsExamined" },
+          totalKeysExamined: { $sum: "$_totalKeysExamined" },
           namespaces: { $addToSet: "$namespace" },
           planSummaries: { $addToSet: "$planSummary" },
+        },
+      },
+      {
+        $addFields: {
+          avgMillis: { $cond: [{ $gt: ["$count", 0] }, { $divide: ["$totalMillis", "$count"] }, 0] },
         },
       },
       {
@@ -541,6 +723,9 @@ router.get("/bubble", async (req, res, next) => {
 // GET /api/metrics/slow-query-sample?appName=X&comment=Y&since=ISO&namespace=&host=&clusterId=
 // Returns the most recent matching slow_query doc — used by the "Explain" popup to show the
 // actual query body before running explain("executionStats") against a chosen cluster.
+//
+// When no raw row exists (e.g. the matching events have been TTL-purged after
+// RETENTION_RAW_DAYS), falls back to the exemplar stored in `slow_queries_hourly`.
 router.get("/slow-query-sample", async (req, res, next) => {
   try {
     const base = buildFilter(req.query);
@@ -566,8 +751,52 @@ router.get("/slow-query-sample", async (req, res, next) => {
       .limit(1)
       .next();
 
-    if (!doc) return res.status(404).json({ error: "No matching slow query found" });
-    res.json(doc);
+    if (doc) return res.json(doc);
+
+    // Fallback: rebuild filter against slow_queries_hourly (timestamp → bucketStart)
+    const rollupFilter = JSON.parse(JSON.stringify(combined, (_, v) =>
+      v instanceof Date ? { __date: v.toISOString() } : v,
+    ));
+    function revive(obj) {
+      if (!obj || typeof obj !== "object") return obj;
+      if (Array.isArray(obj)) return obj.map(revive);
+      if (obj.__date) return new Date(obj.__date);
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === "timestamp") {
+          out.bucketStart = revive(v);
+        } else {
+          out[k] = revive(v);
+        }
+      }
+      return out;
+    }
+    const rolledFilter = revive(rollupFilter);
+
+    const rolled = await getDb()
+      .collection(RC.SLOW_QUERIES_HOURLY)
+      .find(rolledFilter)
+      .sort({ maxMillis: -1, bucketStart: -1 })
+      .limit(1)
+      .next();
+
+    if (!rolled) return res.status(404).json({ error: "No matching slow query found" });
+    res.json({
+      _fromRollup: true,
+      clusterId: rolled.clusterId,
+      clusterName: rolled.clusterName,
+      host: rolled.host,
+      appName: rolled.appName,
+      namespace: rolled.namespace,
+      comment: rolled.comment,
+      queryHash: rolled.queryHash,
+      planSummary: rolled.planSummary,
+      timestamp: rolled.exemplar?.timestamp || rolled.bucketStart,
+      millis: rolled.exemplar?.millis ?? rolled.maxMillis,
+      command: rolled.exemplar?.command || null,
+      originatingCommand: rolled.exemplar?.originatingCommand || null,
+      raw: rolled.exemplar?.raw || null,
+    });
   } catch (err) {
     next(err);
   }
@@ -755,3 +984,5 @@ router.get("/oplog-window", async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.buildQueryStatsPipelinePrefix = buildQueryStatsPipelinePrefix;
+module.exports.buildSlowQueriesPipelinePrefix = buildSlowQueriesPipelinePrefix;

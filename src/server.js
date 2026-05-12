@@ -3,6 +3,7 @@ const express = require("express");
 const path = require("path");
 const { connect, close } = require("./db");
 const { startPolling, stopPolling } = require("./collector");
+const { ensureRetentionIndexes, startRetention, stopRetention } = require("./retention");
 const { closeAll: closeAllPools } = require("./pool-cache");
 
 const app = express();
@@ -32,11 +33,22 @@ const PORT = process.env.PORT || 3000;
 
 async function start() {
   await connect();
+  /** Create TTL + rollup indexes before the collector starts writing so the
+   *  very first batch of raw rows lands on a collection that already has the
+   *  TTL contract. Failures here are non-fatal — log and continue, since the
+   *  collector still works without retention. */
+  try {
+    await ensureRetentionIndexes();
+  } catch (err) {
+    console.error("[retention] ensureRetentionIndexes failed:", err.message);
+  }
   app.listen(PORT, () => console.log(`MongoAdvisor listening on http://localhost:${PORT}`));
   startPolling();
+  startRetention();
 }
 
 process.on("SIGINT", async () => {
+  stopRetention();
   stopPolling();
   await closeAllPools();
   await close();

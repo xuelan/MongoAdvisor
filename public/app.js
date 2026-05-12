@@ -271,7 +271,9 @@ function indexListParams() {
 }
 
 function shortHost(h) {
-  return h.replace(/\.mongodb\.net:\d+$/, "").replace(/\.ljwx2$/, "");
+  return h
+    .replace(/\.mongodb\.net:\d+$/, "")
+    .replace(/\.[a-z0-9]{4,6}$/, "");
 }
 
 async function loadHosts({ resetAll = false } = {}) {
@@ -1964,7 +1966,8 @@ function formatExplainSummary(result, elapsedMs) {
 // The full explain document is huge (pipelines nest queryPlanner → executionStages → inputStage
 // recursively, and every sub-document has its own counters). Users almost always want to start
 // with "which stages are slow?" — so we collect every node that carries an
-// `executionTimeMillisEstimate`, show the top-5 in a table, and expose the raw JSON on demand.
+// `executionTimeMillisEstimate`, render them in their original pipeline / tree order
+// (the `#` column), flag the slowest row, and expose the raw JSON on demand.
 
 /**
  * `executionTimeMillisEstimate` is *cumulative* in MongoDB's explain output:
@@ -2079,14 +2082,19 @@ function renderExplainStages(result) {
   }
   empty.hidden = true;
 
-  // Sort by self-time desc (the true per-stage cost), keep the top 5. Preserve original
-  // stage numbers so the user can map back to the raw pipeline position.
-  const top = [...explainStagesCache].sort((a, b) => b.ms - a.ms).slice(0, 5);
-  const maxMs = top[0].ms || 1;
+  // Render every collected stage in its original traversal order (the `#` column).
+  // We still need the slowest stage to (a) scale the per-row bar and (b) flag it
+  // visually with `is-slowest` so the bottleneck stands out at a glance.
+  const slowest = explainStagesCache.reduce(
+    (best, s) => (s.ms > best.ms ? s : best),
+    explainStagesCache[0],
+  );
+  const maxMs = slowest.ms || 1;
 
-  for (const s of top) {
+  for (const s of explainStagesCache) {
     const tr = document.createElement("tr");
     tr.dataset.stageN = String(s.n);
+    if (s.n === slowest.n) tr.classList.add("is-slowest");
     const barPct = Math.max(2, Math.round((s.ms / maxMs) * 100));
     const barCls = s.ms >= maxMs * 0.8 ? "bad" : s.ms >= maxMs * 0.4 ? "warn" : "";
     tr.innerHTML = `
@@ -2104,7 +2112,7 @@ function renderExplainStages(result) {
   table.hidden = false;
 
   // Auto-select the slowest one so the user sees a detail payload immediately.
-  selectExplainStage(top[0].n);
+  selectExplainStage(slowest.n);
 }
 
 function selectExplainStage(n) {

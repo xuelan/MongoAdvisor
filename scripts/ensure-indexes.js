@@ -63,6 +63,49 @@ const INDEXES = [
     keys: { clusterId: 1, timestamp: -1 },
     options: { name: "oplog_window_cluster_time" },
   },
+
+  // ── Retention TTL + rollup indexes (see docs/retention.md) ──
+  // Server bootstrap also creates these via src/retention.js#ensureRetentionIndexes
+  // but listing them here lets ops verify the deployment from one place.
+  ...["query_stats", "slow_queries", "disk_usage", "oplog_window", "monitor_logs"].map((coll) => ({
+    coll,
+    keys: { timestamp: 1 },
+    options: {
+      name: "ttl_timestamp",
+      expireAfterSeconds:
+        (parseInt(process.env.RETENTION_RAW_DAYS || "7", 10) + 1) * 86400,
+    },
+  })),
+  {
+    coll: "query_stats_hourly",
+    keys: { clusterId: 1, host: 1, queryShapeHash: 1, bucketStart: 1 },
+    options: { unique: true, name: "uniq_query_stats_hourly_bucket" },
+  },
+  {
+    coll: "query_stats_hourly",
+    keys: { clusterId: 1, namespace: 1, bucketStart: -1 },
+    options: { name: "query_stats_hourly_cluster_ns_time" },
+  },
+  {
+    coll: "slow_queries_hourly",
+    keys: { clusterId: 1, host: 1, queryHash: 1, planSummary: 1, bucketStart: 1 },
+    options: { unique: true, name: "uniq_slow_queries_hourly_bucket" },
+  },
+  {
+    coll: "slow_queries_hourly",
+    keys: { clusterId: 1, appName: 1, comment: 1, bucketStart: -1 },
+    options: { name: "slow_queries_hourly_app_comment" },
+  },
+  {
+    coll: "disk_usage_hourly",
+    keys: { clusterId: 1, bucketStart: 1 },
+    options: { unique: true, name: "uniq_disk_usage_hourly_bucket" },
+  },
+  {
+    coll: "oplog_window_hourly",
+    keys: { clusterId: 1, bucketStart: 1 },
+    options: { unique: true, name: "uniq_oplog_window_hourly_bucket" },
+  },
 ];
 
 async function main() {
