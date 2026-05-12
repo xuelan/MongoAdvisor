@@ -21,6 +21,7 @@ app.use("/api/clusters", require("./routes/clusters"));
 app.use("/api/atlas", require("./routes/atlas-admin"));
 app.use("/api/topologies", require("./routes/topologies"));
 app.use("/api/metrics", require("./routes/metrics"));
+app.use("/api/reports", require("./routes/reports"));
 
 app.use((err, _req, res, _next) => {
   const status = err.statusCode || err.status || 500;

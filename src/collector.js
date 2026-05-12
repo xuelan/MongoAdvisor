@@ -1072,7 +1072,7 @@ async function collectStorageStats(cluster) {
         const docCount = stats.count || 0;
         const avgObjSize = stats.avgObjSize || 0;
 
-        // Collection fragmentation via WiredTiger block-manager (same as x-ray)
+        // Collection fragmentation via WiredTiger block-manager 
         const wtBm = stats.wiredTiger?.["block-manager"] || {};
         const collReusable = wtBm["file bytes available for reuse"] || 0;
         const fragmentation = storageSize > 0

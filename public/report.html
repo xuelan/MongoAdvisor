@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MongoAdvisor — Reports</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div class="dot" id="statusDot"></div>
+    <h1>MongoAdvisor</h1>
+    <nav class="top-pills" aria-label="Primary">
+      <a class="btn-filter" href="/">Live</a>
+      <a class="btn-filter active" href="/report.html" aria-current="page">Reports</a>
+    </nav>
+    <span class="badge" id="mongoStatus">checking…</span>
+  </header>
+
+  <main>
+    <!-- LIST + UPLOAD view (no ?id=) -->
+    <div id="reportListView" hidden>
+      <section class="card">
+        <div class="card-header-row">
+          <h2>Upload getMongoData JSON</h2>
+          <div class="info-btn-wrap">
+            <button class="info-btn visible" type="button">i</button>
+            <div class="info-tooltip info-tooltip-wide">
+              <strong>What to upload</strong><br>
+              The JSON output of
+              <a href="https://github.com/mongodb/support-tools/tree/master/getMongoData" target="_blank" rel="noopener">getMongoData.js</a>
+              — run it on each replica-set member, then drop the resulting <code>.log</code> /
+              <code>.json</code> files here. MongoAdvisor groups them by replica-set name and runs
+              eight production-readiness checks (build / security / host / serverStatus / cluster /
+              collections / indexes / sharding).
+            </div>
+          </div>
+        </div>
+
+        <form id="reportUploadForm" class="report-upload-form" enctype="multipart/form-data">
+          <label class="report-drop-zone" id="reportDropZone">
+            <input type="file" id="reportFiles" name="files" accept="application/json,.json,.log,.js" multiple hidden>
+            <div class="report-drop-zone-inner">
+              <span class="report-drop-zone-title">Drag files here</span>
+              <span class="report-drop-zone-sub">or click to pick one or more <code>getMongoData</code> JSON outputs</span>
+            </div>
+          </label>
+          <div id="reportFileQueue" class="report-file-queue" hidden></div>
+          <div class="report-form-row">
+            <input type="text" name="name" placeholder="Optional report name" class="report-name-input">
+            <button type="submit" class="btn" id="reportGenerateBtn" disabled>Generate report</button>
+          </div>
+          <div id="reportUploadFeedback" class="cluster-form-feedback" role="status" aria-live="polite" hidden></div>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="card-header-row">
+          <h2>Past Reports</h2>
+        </div>
+        <div class="storage-table-wrap">
+          <table class="storage-table" id="reportListTable">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Topology</th>
+                <th>Findings</th>
+                <th>Nodes</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="reportListBody"></tbody>
+          </table>
+        </div>
+        <div id="reportListEmpty" class="index-empty" hidden>No reports yet — upload above to generate one.</div>
+      </section>
+    </div>
+
+    <!-- SINGLE REPORT view (?id=…) -->
+    <div id="reportSingleView" hidden>
+      <section class="card report-summary-card">
+        <div class="report-summary-row">
+          <div class="report-summary-block">
+            <span class="report-summary-label">Report</span>
+            <span class="report-summary-value" id="rsName">—</span>
+          </div>
+          <div class="report-summary-block">
+            <span class="report-summary-label">Topology</span>
+            <span class="report-summary-value" id="rsTopology">—</span>
+          </div>
+          <div class="report-summary-block">
+            <span class="report-summary-label">Nodes / collections / indexes</span>
+            <span class="report-summary-value" id="rsCounts">—</span>
+          </div>
+          <div class="report-summary-block">
+            <span class="report-summary-label">Findings</span>
+            <span class="report-summary-value" id="rsFindings">—</span>
+          </div>
+          <div class="report-summary-actions">
+            <a class="btn-secondary btn" href="/report.html">Back to list</a>
+            <a class="btn" id="rsDownload" href="#" download>Download HTML</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <nav class="report-tabs" id="reportTabs" aria-label="Report sections">
+          <button class="btn-filter active" data-tab="overview">Overview</button>
+          <button class="btn-filter" data-tab="nodes">Nodes</button>
+          <button class="btn-filter" data-tab="databases">Databases</button>
+          <button class="btn-filter" data-tab="collections">Collections</button>
+          <button class="btn-filter" data-tab="indexes">Indexes</button>
+          <button class="btn-filter" data-tab="params">Parameters</button>
+          <button class="btn-filter" data-tab="raw">Raw JSON</button>
+        </nav>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="overview">
+        <div class="grid-2">
+          <div>
+            <h2>Findings by severity</h2>
+            <canvas id="chartSeverity" class="report-chart-canvas"></canvas>
+          </div>
+          <div>
+            <h2>Storage by database</h2>
+            <canvas id="chartStorage" class="report-chart-canvas"></canvas>
+          </div>
+        </div>
+        <h2 class="report-section-h2">Findings</h2>
+        <div id="findingsList" class="report-findings-list"></div>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="nodes" hidden>
+        <h2>Nodes</h2>
+        <div id="nodesContent"></div>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="databases" hidden>
+        <h2>Databases</h2>
+        <div class="storage-table-wrap">
+          <table class="storage-table">
+            <thead>
+              <tr>
+                <th>Database</th>
+                <th>Collections</th>
+                <th>Data size</th>
+                <th>Storage size</th>
+                <th>Index size</th>
+              </tr>
+            </thead>
+            <tbody id="dbsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="collections" hidden>
+        <h2>Collections <span class="subtitle">top 30 by storage size — color = fragmentation</span></h2>
+        <canvas id="chartCollections" class="report-chart-canvas"></canvas>
+        <div class="storage-table-wrap">
+          <table class="storage-table" id="collectionsTable">
+            <thead>
+              <tr>
+                <th>Namespace</th>
+                <th>Docs</th>
+                <th>Data size</th>
+                <th>Storage size</th>
+                <th class="th-highlight">Reusable</th>
+                <th class="th-highlight">Frag %</th>
+                <th>Index size</th>
+                <th>Indexes</th>
+              </tr>
+            </thead>
+            <tbody id="collectionsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="indexes" hidden>
+        <h2>Indexes <span class="subtitle">grouped by namespace</span></h2>
+        <canvas id="chartIndexes" class="report-chart-canvas"></canvas>
+        <div id="indexesContent"></div>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="params" hidden>
+        <h2>Server parameters <span class="subtitle">per node</span></h2>
+        <div id="paramsContent"></div>
+      </section>
+
+      <section class="card report-tab" data-tab-pane="raw" hidden>
+        <h2>Raw JSON</h2>
+        <p class="report-hint">
+          This is the parsed + normalized payload (one entry per uploaded node). Use the original
+          <code>getMongoData.js</code> output for raw EJSON.
+        </p>
+        <pre id="rawJsonPre" class="explain-query-pre report-raw-pre" spellcheck="false"></pre>
+      </section>
+    </div>
+
+    <div id="reportLoading" class="index-empty">Loading…</div>
+    <div id="reportError" class="cluster-form-feedback err" role="alert" hidden></div>
+  </main>
+
+  <!-- Report data placeholder: stripped on download.html, populated on standalone files. -->
+  <!-- <script type="application/json" id="reportData"></script> -->
+
+  <script src="report.js"></script>
+</body>
+</html>

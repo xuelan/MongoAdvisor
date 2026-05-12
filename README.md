@@ -77,6 +77,19 @@ and **Generate drop-index scripts**. Workflow details:
 [explain-img]: docs/images/explain-stage-breakdown.jpg
 [indexes-img]: docs/images/unused-and-redundant-indexes.jpg
 
+## Offline reports from `getMongoData.js`
+
+When network access to the cluster isn't an option (support engagement,
+air-gapped, customer-shared dump), you can drop one or more
+[`getMongoData.js`](https://github.com/mongodb/support-tools/tree/master/getMongoData)
+captures into MongoAdvisor and get a self-contained report. Eight
+production-readiness checks (build, security, host, serverStatus,
+cluster, coll, index, shardKey) run per node and are aggregated by
+replica-set name. Open **Reports** in the header (or
+`http://localhost:3000/report.html`), drop the JSON file(s), and click
+**Download HTML** to share a single offline artifact. Full reference:
+[docs/reports.md](docs/reports.md).
+
 ## Documentation map
 
 This README is a **5-minute onboarding** doc. The deep dives live under
@@ -90,6 +103,7 @@ This README is a **5-minute onboarding** doc. The deep dives live under
 | Workload scripts + Atlas sample-data prerequisite     | [docs/workloads.md](docs/workloads.md)           |
 | HTTP API endpoints & query parameters                 | [docs/api.md](docs/api.md)                       |
 | Dashboard charts, filters, empty-state badges         | [docs/dashboard.md](docs/dashboard.md)           |
+| Cluster Reports (offline `getMongoData.js` analysis)  | [docs/reports.md](docs/reports.md)               |
 | Project layout, unit tests, roadmap                   | [docs/development.md](docs/development.md)       |
 
 ## Supported targets and requirements

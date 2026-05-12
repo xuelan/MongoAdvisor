@@ -64,6 +64,18 @@ const INDEXES = [
     options: { name: "oplog_window_cluster_time" },
   },
 
+  // ── getMongoData offline reports (see docs/reports.md) ──
+  {
+    coll: "reports",
+    keys: { createdAt: -1 },
+    options: { name: "reports_createdAt_desc" },
+  },
+  {
+    coll: "reports_raw",
+    keys: { reportId: 1 },
+    options: { name: "reports_raw_reportId" },
+  },
+
   // ── Retention TTL + rollup indexes (see docs/retention.md) ──
   // Server bootstrap also creates these via src/retention.js#ensureRetentionIndexes
   // but listing them here lets ops verify the deployment from one place.
