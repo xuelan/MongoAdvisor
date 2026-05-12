@@ -41,6 +41,24 @@ function run(report) {
         severity: "MEDIUM",
         title: `ulimit -n is low (${maxOpen})`,
         description: `Recommended max open files is ${MIN_MAX_OPEN_FILES}+. Low limits cause connection-storm outages under load. See https://www.mongodb.com/docs/manual/reference/ulimit/.`,
+        actions: [
+          {
+            kind: "systemd",
+            label: "systemd override for mongod (bash)",
+            warning:
+              "Requires root + a service restart on the node. Atlas / managed services: not user-configurable.",
+            command:
+              "# /etc/systemd/system/mongod.service.d/limits.conf\n" +
+              "sudo mkdir -p /etc/systemd/system/mongod.service.d\n" +
+              "sudo tee /etc/systemd/system/mongod.service.d/limits.conf <<'EOF'\n" +
+              "[Service]\n" +
+              `LimitNOFILE=${MIN_MAX_OPEN_FILES}\n` +
+              "LimitNPROC=64000\n" +
+              "EOF\n" +
+              "sudo systemctl daemon-reload\n" +
+              "sudo systemctl restart mongod",
+          },
+        ],
       });
     }
 

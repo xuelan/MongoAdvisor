@@ -93,4 +93,5 @@ they need either dependency injection or an integration-test setup.
 3. **Sharded cluster support.** Currently only replica sets are covered
   end-to-end — Atlas `mongos` processes are filtered out by the collector.
 4. **Integration tests**
+5. Report recommendations to improve
 

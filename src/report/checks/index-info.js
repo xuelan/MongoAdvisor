@@ -32,6 +32,33 @@ function parseSince(value) {
   return Number.isFinite(t) ? t : null;
 }
 
+function dropIndexActions(dbName, collName, indexName) {
+  const dbExpr = `db.getSiblingDB(${JSON.stringify(dbName)})`;
+  const collExpr = `${dbExpr}.getCollection(${JSON.stringify(collName)})`;
+  const inm = JSON.stringify(indexName);
+  return [
+    {
+      kind: "hideIndex",
+      label: "Hide first (reversible, mongosh)",
+      warning:
+        "Hidden indexes stay on disk but are ignored by the planner. Watch a full business cycle of traffic before dropping — unhide if you see regressions.",
+      command:
+        `// Hide ${indexName} on ${dbName}.${collName}\n` +
+        `${collExpr}.hideIndex(${inm});\n` +
+        `// Reverse if needed: ${collExpr}.unhideIndex(${inm});`,
+    },
+    {
+      kind: "dropIndex",
+      label: "Drop (irreversible, mongosh)",
+      warning:
+        "Dropping is destructive. Run only after one full business cycle of hidden-state observation, or in a staging environment first.",
+      command:
+        `// Drop ${indexName} on ${dbName}.${collName}\n` +
+        `${collExpr}.dropIndex(${inm});`,
+    },
+  ];
+}
+
 function run(report, thresholds) {
   const t = thresholds?.IndexInfoItem || {};
   const unusedMs = (t.unused_index_days || 7) * 86400 * 1000;
@@ -51,6 +78,7 @@ function run(report, thresholds) {
         if (t.num_indexes && idxs.length > t.num_indexes) {
           findings.push({
             host: node.host,
+            namespace: ns,
             severity: "MEDIUM",
             title: `${idxs.length} indexes on ${ns}`,
             description: `Above the ${t.num_indexes}-index threshold. Each extra index slows writes and bloats storage — audit usage with \`$indexStats\` and drop the ones that aren't needed.`,
@@ -67,9 +95,13 @@ function run(report, thresholds) {
             if (isPrefixOf(a.key, b.key)) {
               findings.push({
                 host: node.host,
+                namespace: ns,
+                indexName: a.name,
+                indexKey: a.key,
                 severity: "LOW",
                 title: `Redundant index ${a.name} on ${ns}`,
                 description: `Key {${indexKeyString(a.key)}} is a strict prefix of {${indexKeyString(b.key)}} (\`${b.name}\`). Drop the shorter one to save write cost and storage.`,
+                actions: dropIndexActions(db.name, coll.name, a.name),
               });
               break; // one finding per index is enough
             }
@@ -77,9 +109,12 @@ function run(report, thresholds) {
         }
 
         // Unused — at least one host reports 0 ops AND the index is older than the threshold.
+        // `coll.indexStats` is keyed by index name (when collected via aggregateStats); each
+        // entry carries the index `name` and `key` plus the per-host accesses.
         const stats = coll.indexStats || [];
         for (const entry of stats) {
-          const name = entry?.key ? indexKeyString(entry.key) : "(unknown key)";
+          const indexName = entry?.name || (entry?.key ? indexKeyString(entry.key) : "(unknown)");
+          const keyStr = entry?.key ? indexKeyString(entry.key) : "(unknown key)";
           const hosts = entry?.stats || [];
           for (const h of hosts) {
             const ops = Number(h.accesses || 0);
@@ -88,9 +123,13 @@ function run(report, thresholds) {
               const ageDays = Math.round((captureMs - since) / 86400000);
               findings.push({
                 host: h.host || node.host,
+                namespace: ns,
+                indexName,
+                indexKey: entry?.key,
                 severity: "LOW",
-                title: `Unused index {${name}} on ${ns}`,
-                description: `Zero \`$indexStats\` accesses on ${h.host || node.host} since ${new Date(since).toISOString()} (${ageDays} days). Hide first (\`collMod\`), drop after one business cycle.`,
+                title: `Unused index ${indexName} on ${ns}`,
+                description: `Zero \`$indexStats\` accesses on ${h.host || node.host} for {${keyStr}} since ${new Date(since).toISOString()} (${ageDays} days). Hide first, then drop after one business cycle.`,
+                actions: dropIndexActions(db.name, coll.name, indexName),
               });
             }
           }

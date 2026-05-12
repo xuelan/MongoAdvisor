@@ -62,9 +62,22 @@ function run(report, thresholds) {
           if (t.fragmentation_ratio && frag > t.fragmentation_ratio) {
             findings.push({
               host: node.host,
+              namespace: ns,
               severity: "MEDIUM",
               title: `Fragmentation ${Math.round(frag * 100)}% on ${ns}`,
               description: `WiredTiger reports ${freeMb.toFixed(0)} MB reusable of ${storageMb.toFixed(0)} MB storage size. Compact during a maintenance window or rolling-resync — see https://www.mongodb.com/docs/manual/reference/command/compact/.`,
+              actions: [
+                {
+                  kind: "compact",
+                  label: "Reclaim reusable bytes (mongosh)",
+                  warning:
+                    "compact holds an exclusive lock on the collection on this node — run rolling, secondary first, then step-down and repeat on the old PRIMARY. Atlas: contact support / use rolling-resync.",
+                  command:
+                    "// Connect to a SECONDARY (or run rolling across the set)\n" +
+                    `db = db.getSiblingDB(${JSON.stringify(db.name)});\n` +
+                    `db.runCommand({ compact: ${JSON.stringify(coll.name)}, force: true });`,
+                },
+              ],
             });
           }
 
@@ -73,6 +86,7 @@ function run(report, thresholds) {
           if (t.index_size_ratio && idxRatio > t.index_size_ratio) {
             findings.push({
               host: node.host,
+              namespace: ns,
               severity: "LOW",
               title: `Index footprint ${Math.round(idxRatio * 100)}% on ${ns}`,
               description: `\`totalIndexSize\` / \`storageSize\` = ${idxRatio.toFixed(2)} (threshold ${t.index_size_ratio}). Drop unused / redundant indexes — see the IndexInfo findings below.`,

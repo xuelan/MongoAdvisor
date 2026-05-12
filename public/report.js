@@ -137,7 +137,12 @@
     const w = canvas.clientWidth || 480;
     const h = labels.length * (rowH + gap) + 12;
     const labelW = Math.min(220, Math.max(60, w * 0.35));
-    const barAreaW = w - labelW - 20;
+    // Reserve a value gutter on the right so the longest bar's value label
+    // (e.g. "32.9 GB") always fits inside the canvas. Without this, the max bar
+    // fills the full bar area and the trailing unit gets clipped at the edge.
+    const valueGutter = 72;
+    const rightPad = 8;
+    const barAreaW = Math.max(40, w - labelW - rightPad - valueGutter);
     const svg = svgEl("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
     labels.forEach((lbl, i) => {
       const y = i * (rowH + gap) + 6;
@@ -148,8 +153,17 @@
       svg.appendChild(bg);
       const bw = Math.max(2, (values[i] / max) * barAreaW);
       svg.appendChild(svgEl("rect", { x: labelW, y, width: bw, height: rowH, fill: colors[i] || PALETTE[i % PALETTE.length], rx: 4 }));
-      const vText = svgEl("text", { x: labelW + bw + 6, y: y + rowH - 6, fill: "#e0e0e0", "font-size": "0.72rem" });
-      vText.textContent = spec.formatValue ? spec.formatValue(values[i]) : String(values[i]);
+      const valueStr = spec.formatValue ? spec.formatValue(values[i]) : String(values[i]);
+      // Default: draw the value after the bar (in the gutter). On very narrow viewports
+      // where the gutter would still overflow, draw it inside the bar instead, right-
+      // aligned, so the text never gets clipped by the SVG edge.
+      const naturalX = labelW + bw + 6;
+      const maxX = w - rightPad;
+      const fitsAfterBar = naturalX + valueGutter - 6 <= maxX;
+      const vText = fitsAfterBar
+        ? svgEl("text", { x: naturalX, y: y + rowH - 6, fill: "#e0e0e0", "font-size": "0.72rem" })
+        : svgEl("text", { x: labelW + bw - 6, y: y + rowH - 6, "text-anchor": "end", fill: "#0a0e13", "font-size": "0.72rem", "font-weight": "600" });
+      vText.textContent = valueStr;
       svg.appendChild(vText);
     });
     canvas.style.display = "none";
@@ -634,15 +648,372 @@
     }
   }
 
-  function findingItem(f) {
-    return el("div", { class: `report-finding sev-${(f.severity || "info").toLowerCase()}-border` },
-      el("div", { class: "report-finding-head" },
-        severityBadge(f.severity),
-        el("span", { class: "report-finding-title" }, f.title || "(no title)"),
-        el("span", { class: "report-finding-meta" }, `${f.item || f.id || ""} · ${f.host || ""}`),
-      ),
+  // ─── findings rendering (grouped + actionable) ───
+
+  function copyToClipboard(text, button) {
+    const done = (ok) => {
+      if (!button) return;
+      const original = button.dataset.originalLabel || button.textContent;
+      button.dataset.originalLabel = original;
+      button.textContent = ok ? "✓ Copied" : "Copy failed";
+      button.classList.add(ok ? "copied" : "copy-failed");
+      setTimeout(() => {
+        button.textContent = original;
+        button.classList.remove("copied", "copy-failed");
+      }, 1500);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => done(true), () => done(false));
+      return;
+    }
+    // Fallback for file:// and other non-secure contexts (used in the offline HTML).
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      done(ok);
+    } catch (_) {
+      done(false);
+    }
+  }
+
+  function actionBlock(action) {
+    const wrap = el("div", { class: `report-action report-action-${action.kind || "generic"}` });
+    const head = el("div", { class: "report-action-head" },
+      el("span", { class: "report-action-label" }, action.label || "Suggested command"),
+    );
+    if (action.link) {
+      head.appendChild(el("a", {
+        class: "report-action-link",
+        href: action.link,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        title: action.link,
+      }, action.linkLabel || "Docs"));
+    }
+    head.appendChild(el("button", {
+      type: "button",
+      class: "btn-secondary btn-mini report-action-copy",
+      onclick: (ev) => copyToClipboard(action.command || "", ev.currentTarget),
+    }, "Copy"));
+    wrap.appendChild(head);
+    if (action.warning) {
+      wrap.appendChild(el("div", { class: "report-action-warning" }, action.warning));
+    }
+    const pre = el("pre", { class: "report-action-pre" });
+    pre.textContent = action.command || "";
+    wrap.appendChild(pre);
+    return wrap;
+  }
+
+  function findingItem(f, options) {
+    const opts = options || {};
+    const head = el("div", { class: "report-finding-head" },
+      severityBadge(f.severity),
+      el("span", { class: "report-finding-title" }, f.title || "(no title)"),
+    );
+    if (f.docs) {
+      head.appendChild(el("a", {
+        class: "report-finding-doc",
+        href: f.docs,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        title: f.docs,
+      }, "Docs"));
+    }
+    const metaBits = [];
+    if (f.meta) metaBits.push(f.meta);
+    if (f.host) metaBits.push(f.host);
+    if (metaBits.length > 0) {
+      head.appendChild(el("span", { class: "report-finding-meta" }, `· ${metaBits.join(" · ")}`));
+    }
+    const node = el("div", { class: `report-finding sev-${(f.severity || "info").toLowerCase()}-border` },
+      head,
       el("div", { class: "report-finding-desc" }, f.description || ""),
     );
+    // Per-finding action snippets only render when the caller asks for them (e.g. the
+    // Cluster group, where there is typically just one oplog finding so the snippets
+    // belong next to it). For high-cardinality groups (Indexes, Collections) the
+    // snippets are surfaced once at the group level via the advice card / bulk buttons.
+    if (opts.showActions && Array.isArray(f.actions) && f.actions.length > 0) {
+      const actionsWrap = el("div", { class: "report-finding-actions" });
+      f.actions.forEach((a) => actionsWrap.appendChild(actionBlock(a)));
+      node.appendChild(actionsWrap);
+    }
+    return node;
+  }
+
+  function groupHeader(item, findings) {
+    const head = el("div", { class: "report-findings-group-head" });
+    head.appendChild(el("h3", { class: "report-findings-group-title" }, item || "Other"));
+    const counts = { HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0 };
+    findings.forEach((f) => { counts[(f.severity || "INFO").toUpperCase()] += 1; });
+    const pills = el("div", { class: "report-findings-group-pills" });
+    SEVERITY_ORDER.forEach((s) => {
+      if (counts[s] > 0) pills.appendChild(el("span", { class: `sev-pill sev-${s.toLowerCase()}` }, `${counts[s]} ${s}`));
+    });
+    head.appendChild(pills);
+    // Bulk-script buttons are owned by the per-group advice card; we keep this header
+    // minimal so the eye lands on the explanation first.
+    return head;
+  }
+
+  // Severity sort key — lower index = higher severity = sorted first.
+  function sevRank(sev) {
+    const i = SEVERITY_ORDER.indexOf((sev || "INFO").toUpperCase());
+    return i === -1 ? SEVERITY_ORDER.length : i;
+  }
+
+  // ─── group-level advice (one card per group, mirroring the live dashboard) ───
+
+  // Each entry returns { title, explanation, warning, bullets[], scripts[] }. `scripts`
+  // are derived from per-finding actions so the bulk Copy buttons stay accurate even when
+  // the user changes the underlying check thresholds.
+  function adviceForGroup(item, findings) {
+    switch (item) {
+      case "Collections":  return collectionsAdvice(findings);
+      case "Indexes":      return indexesAdvice(findings);
+      case "Cluster":      return clusterAdvice(findings);
+      case "Host info":    return hostInfoAdvice(findings);
+      case "Security":     return securityAdvice(findings);
+      case "Build info":   return buildInfoAdvice(findings);
+      case "Server status":return serverStatusAdvice(findings);
+      case "Sharding":     return shardingAdvice(findings);
+      default:             return null;
+    }
+  }
+
+  function bulkScriptFromFindings(findings, kind, header) {
+    const actions = findings.flatMap((f) => f.actions || []).filter((a) => a.kind === kind);
+    if (actions.length === 0) return null;
+    return [header.trim(), "", ...actions.map((a) => a.command + "\n")].join("\n");
+  }
+
+  function collectionsAdvice(findings) {
+    const compactBulk = bulkScriptFromFindings(
+      findings,
+      "compact",
+      "// MongoAdvisor — bulk COMPACT for fragmented collections in this group.\n" +
+        "// [Warning] STAGING FIRST. compact holds an exclusive lock on each collection on\n" +
+        "// the node it runs on — run rolling: connect to a SECONDARY, run there, step the\n" +
+        "// PRIMARY down, repeat. On Atlas you cannot run compact — request a rolling resync\n" +
+        "// from MongoDB Support instead.",
+    );
+    return {
+      title: "Storage fragmentation",
+      explanation:
+        "Fragmentation mainly matters when you are disk-bound or need to shrink storage. WiredTiger does not return reusable space to the OS on its own, but it will reuse that space for new writes — so a high fragmentation ratio is not, by itself, a performance issue.",
+      bullets: [
+        "Run `compact` (MongoDB ≤ 7) or `autoCompact` (MongoDB 8.0+) during a maintenance window, secondaries first, PRIMARY last via step-down.",
+        "On Atlas, `compact` is not available — open a support ticket to request a rolling resync, which rebuilds each member from a fresh snapshot.",
+        "For very large collections that are upstream-sourced (CDC, ETL), it can be faster to drop and re-create from the source than to compact in place.",
+      ],
+      docs: "https://www.mongodb.com/docs/manual/reference/command/compact/",
+      scripts: compactBulk
+        ? [
+            {
+              label: "Copy bulk compact script",
+              text: compactBulk,
+            },
+          ]
+        : [],
+    };
+  }
+
+  function indexesAdvice(findings) {
+    const hideBulk = bulkScriptFromFindings(
+      findings,
+      "hideIndex",
+      "// MongoAdvisor — bulk HIDE for unused / redundant indexes in this group.\n" +
+        "// [Warning] STAGING FIRST. Hidden indexes stay on disk but are ignored by the\n" +
+        "// planner. Observe one full business cycle before dropping. Unhide if anything\n" +
+        "// regresses.",
+    );
+    const dropBulk = bulkScriptFromFindings(
+      findings,
+      "dropIndex",
+      "// MongoAdvisor — bulk DROP for unused / redundant indexes in this group.\n" +
+        "// [Warning] Irreversible. Run only after a hidden-state observation period or in\n" +
+        "// staging. Rebuilding a dropped index on a large collection is expensive.",
+    );
+    const scripts = [];
+    if (hideBulk) scripts.push({ label: "Copy hide-all script", text: hideBulk });
+    if (dropBulk) scripts.push({ label: "Copy drop-all script", text: dropBulk });
+    return {
+      title: "Index hygiene",
+      warning:
+        "[Warning] Test in staging before applying to production. An index that looks unused over the captured window may still be needed for end-of-month / year-end / rare reports.",
+      bullets: [
+        "Double-check the application code to confirm each candidate index is not used in any query. `$indexStats` only sees what's been queried since the stats counter was last reset (server restart, version upgrade, etc.).",
+        "Hide indexes first (`hideIndex`) — this is reversible. Watch for slow-query regressions across one full business cycle.",
+        "Drop the index (`dropIndex`) only after the observation period. Dropping is irreversible; rebuilding on a large collection is expensive.",
+        "Redundant indexes (key A is a strict prefix of key B) are the safest candidates: any query the shorter index could serve, the longer one already serves.",
+      ],
+      docs: "https://www.mongodb.com/docs/manual/core/indexes/",
+      scripts,
+    };
+  }
+
+  function clusterAdvice(findings) {
+    // Oplog is the most common Cluster finding — there is typically one per replica-set
+    // group, with platform-specific actions already attached. We surface those snippets
+    // inline in the advice card so the reader sees one unified explanation per group.
+    const oplog = findings.find((f) => /oplog window/i.test(f.title || ""));
+    const bullets = [];
+    if (oplog) {
+      bullets.push(
+        "A short oplog window reduces resilience — secondaries, change streams, downstream consumers (Search, Triggers, Sync) all need the oplog to catch up.",
+        "Recommended minimum is 48 h so the cluster can survive a maintenance window or a full resync without falling out of sync.",
+      );
+      if (oplog.platform === "atlas") {
+        bullets.push(
+          "Atlas blocks the `replSetResizeOplog` shell command. Use the Additional Settings pane in the UI, the Atlas CLI, or the Admin API — Atlas rolls each shard / config replica set automatically.",
+        );
+      } else {
+        bullets.push(
+          "On self-managed, run `replSetResizeOplog` rolling — secondaries first, then step the PRIMARY down.",
+        );
+      }
+    }
+    const lag = findings.find((f) => /Secondary lag/i.test(f.title || ""));
+    if (lag) {
+      bullets.push(
+        "Secondary lag almost always points to slow disk on the replica, a network bottleneck, or batch-apply contention. Check disk latency and replication network throughput first.",
+      );
+    }
+    const noPrimary = findings.find((f) => /no PRIMARY/i.test(f.title || ""));
+    if (noPrimary) {
+      bullets.push(
+        "No PRIMARY means reads/writes are stalled. Inspect election logs and member states immediately — usually a recent partition or a downed member.",
+      );
+    }
+    if (bullets.length === 0) {
+      bullets.push("Inspect the individual cluster findings below for details.");
+    }
+    return {
+      title: "Replica-set health",
+      bullets,
+      docs:
+        oplog && oplog.platform === "atlas"
+          ? "https://www.mongodb.com/docs/atlas/cluster-additional-settings/#set-minimum-oplog-window"
+          : "https://www.mongodb.com/docs/manual/core/replica-set-oplog/",
+      // Render the oplog finding's platform-specific snippets inline in the advice card.
+      inlineActions: oplog ? (oplog.actions || []) : [],
+    };
+  }
+
+  function hostInfoAdvice(findings) {
+    const ulimit = findings.find((f) => /ulimit/i.test(f.title || ""));
+    return {
+      title: "Host configuration",
+      bullets: [
+        "Production MongoDB runs on Linux with NUMA pinned (`numactl --interleave=all`) and `ulimit -n` ≥ 64 000 — without these, you'll hit connection-storm and memory-locality issues under load.",
+        "Verify with `cat /proc/<mongod-pid>/limits` on each member.",
+      ],
+      docs: "https://www.mongodb.com/docs/manual/administration/production-checklist-operations/",
+      inlineActions: ulimit ? (ulimit.actions || []) : [],
+    };
+  }
+
+  function securityAdvice() {
+    return {
+      title: "Security posture",
+      bullets: [
+        "Authentication should be enabled cluster-wide (SCRAM, x509, or LDAP) and TLS should be `requireTLS` — anything weaker accepts unencrypted client traffic.",
+        "Disable server-side JavaScript (`security.javascriptEnabled: false`) unless `$where` / `mapReduce` is actually in use — it narrows the attack surface.",
+        "Once the deployment has any user, set `enableLocalhostAuthBypass` to 0 so the bypass cannot be re-armed.",
+      ],
+      docs: "https://www.mongodb.com/docs/manual/security-checklist/",
+    };
+  }
+
+  function buildInfoAdvice() {
+    return {
+      title: "Server version",
+      bullets: [
+        "Stay on a supported major release. End-of-life versions stop receiving security fixes — plan an upgrade before the EOL date.",
+        "On Atlas, upgrade through the UI (Versions tab). On self-managed, follow the rolling upgrade procedure: secondaries first, then step down the PRIMARY.",
+      ],
+      docs: "https://www.mongodb.com/legal/support-policy/lifecycles",
+    };
+  }
+
+  function serverStatusAdvice() {
+    return {
+      title: "Runtime counters",
+      bullets: [
+        "Connection saturation usually means a client-side connection pool is too large — audit driver `maxPoolSize` before raising `net.maxIncomingConnections`.",
+        "High `scanned : returned` (query targeting) ratios are the classic signal of a missing or unselective index. Cross-reference with the Indexes findings.",
+        "Sustained `bytes read into cache` per second above the threshold usually means the working set no longer fits in RAM — either resize the cache or scale the instance.",
+      ],
+      docs: "https://www.mongodb.com/docs/manual/reference/command/serverStatus/",
+    };
+  }
+
+  function shardingAdvice() {
+    return {
+      title: "Sharding & balancer",
+      bullets: [
+        "Persistent chunk imbalance points at either a low-cardinality shard key or a balancer disabled for too long.",
+        "If the balancer is not in `full` mode, re-enable it with `sh.startBalancer()` once the underlying issue is understood.",
+        "For jumbo chunks, refine the shard key — `reshardCollection` is supported on 5.0+.",
+      ],
+      docs: "https://www.mongodb.com/docs/manual/core/sharding-balancer/",
+    };
+  }
+
+  function adviceCard(advice) {
+    const card = el("div", { class: "report-group-advice" });
+    const head = el("div", { class: "report-group-advice-head" },
+      el("span", { class: "report-group-advice-title" }, advice.title || "Recommended actions"),
+    );
+    if (advice.docs) {
+      head.appendChild(el("a", {
+        class: "report-finding-doc",
+        href: advice.docs,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        title: advice.docs,
+      }, "Docs"));
+    }
+    card.appendChild(head);
+    if (advice.explanation) {
+      card.appendChild(el("p", { class: "report-group-advice-text" }, advice.explanation));
+    }
+    if (advice.warning) {
+      card.appendChild(el("p", { class: "report-group-advice-warning" }, advice.warning));
+    }
+    if (Array.isArray(advice.bullets) && advice.bullets.length > 0) {
+      card.appendChild(el("div", { class: "report-group-advice-subtitle" }, "Recommended actions"));
+      const ul = el("ul", { class: "report-group-advice-bullets" });
+      advice.bullets.forEach((b) => ul.appendChild(el("li", null, b)));
+      card.appendChild(ul);
+    }
+    // Bulk-script "Copy" buttons (text-only payload, no inline pre).
+    if (Array.isArray(advice.scripts) && advice.scripts.length > 0) {
+      const tools = el("div", { class: "report-group-advice-tools" });
+      advice.scripts.forEach((s) => {
+        tools.appendChild(el("button", {
+          type: "button",
+          class: "btn-secondary btn-mini",
+          onclick: (ev) => copyToClipboard(s.text, ev.currentTarget),
+        }, s.label));
+      });
+      card.appendChild(tools);
+    }
+    // Inline per-finding actions (e.g. the oplog snippets) — these include their own pre
+    // block and Copy button so the reader can pick the snippet that fits their setup.
+    if (Array.isArray(advice.inlineActions) && advice.inlineActions.length > 0) {
+      const actions = el("div", { class: "report-finding-actions" });
+      advice.inlineActions.forEach((a) => actions.appendChild(actionBlock(a)));
+      card.appendChild(actions);
+    }
+    return card;
   }
 
   function buildFindingsList(report) {
@@ -653,8 +1024,38 @@
       wrap.appendChild(el("p", { class: "report-muted" }, "No findings — every check passed."));
       return;
     }
-    findings.sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
-    findings.forEach((f) => wrap.appendChild(findingItem(f)));
+
+    // Group by check item label, preserving original `id` as a fallback. The summary card
+    // already showed the global totals, so here we want one section per check category.
+    const groups = new Map();
+    for (const f of findings) {
+      const key = f.item || f.id || "Other";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(f);
+    }
+
+    // Sort: groups by their max severity (HIGH first), then by group name; findings
+    // inside each group by severity then host.
+    const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
+      const sa = Math.min(...a[1].map((f) => sevRank(f.severity)));
+      const sb = Math.min(...b[1].map((f) => sevRank(f.severity)));
+      if (sa !== sb) return sa - sb;
+      return a[0].localeCompare(b[0]);
+    });
+
+    for (const [item, list] of sortedGroups) {
+      list.sort((a, b) => sevRank(a.severity) - sevRank(b.severity) || String(a.host || "").localeCompare(String(b.host || "")));
+      const section = el("div", { class: "report-findings-group" });
+      section.appendChild(groupHeader(item, list));
+      const advice = adviceForGroup(item, list);
+      if (advice) section.appendChild(adviceCard(advice));
+      const body = el("div", { class: "report-findings-group-body" });
+      // The Cluster group typically has 1-2 actionable findings (oplog), and its advice
+      // card already inlines those snippets, so don't render per-finding actions again.
+      list.forEach((f) => body.appendChild(findingItem(f, { showActions: false })));
+      section.appendChild(body);
+      wrap.appendChild(section);
+    }
   }
 
   function buildSummaryCard(report) {

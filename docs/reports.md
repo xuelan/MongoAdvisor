@@ -50,7 +50,19 @@ The source of truth for thresholds lives in
 | `ShardKeyItem`     | `shard_info` (only present when getMongoData was run against a mongos)                | `sharding_imbalance_percentage: 0.1`.                                                                                                                                                          |
 
 Each finding has a `severity` (`HIGH`, `MEDIUM`, `LOW`, `INFO`), a
-`host`, a `title`, and a `description`.
+`host`, a `title`, and a `description`. Where the remediation is
+mechanical, findings also carry an `actions[]` array with copy‑ready
+mongosh snippets — currently:
+
+- `compact` (fragmented collection)
+- `hideIndex` + `dropIndex` (redundant or unused index) — with a bulk
+  "Copy hide-all / drop-all script" button at the group header
+- `resizeOplog` + `minRetention` (oplog window below threshold)
+- `systemd` (low `ulimit -n`)
+
+The UI groups findings by check (`Cluster`, `Collections`, `Indexes`,
+`Security`, etc.); each group shows a per-severity pill summary and is
+ordered by the worst severity it contains.
 
 ## Limits and trade-offs
 
