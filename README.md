@@ -116,30 +116,46 @@ This README is a **5-minute onboarding** doc. The deep dives live under
 
 ## Architecture
 
-```
-┌────────────────────────────┐       ┌────────────────────────────┐
-│ Source MongoDB cluster(s)  │       │ MongoAdvisor backend DB    │
-│                            │       │                            │
-│   ┌────┐ ┌────┐ ┌────┐     │  ──►  │ collector.js               │
-│   │ P  │ │ S  │ │ S  │     │       │ · $queryStats (per host)   │
-│   └────┘ └────┘ └────┘     │       │ · Atlas Logs API (opt.)    │
-└────────────────────────────┘       │ · hello / topology         │
-                                     │ · $indexStats / collStats  │
-                                     │ · dbStats, oplog window    │
-                                     │ · daily storage scan       │
-                                     │                            │
-                                     │ Collections: clusters,     │
-                                     │ topologies, query_stats,   │
-                                     │ slow_queries, index_stats, │
-                                     │ storage_stats, disk_usage, │
-                                     │ oplog_window, monitor_logs │
-                                     │                            │
-                                     │ Express :3000 · public/    │
-                                     └────────────────────────────┘
+Five logical components, three external boundaries (mongo wire, HTTPS to
+Atlas, HTTP to the browser):
+
+```mermaid
+flowchart TB
+    Browser["<b>Browser</b><br/>Chart.js dashboard<br/>(public/index.html)"]
+
+    subgraph Backend["<b>MongoAdvisor backend</b> · Node.js · Express :3000"]
+        direction LR
+        Collector["collector.js<br/>5 / 10-min pollers"]
+        Retention["retention.js<br/>hourly rollups + TTL"]
+        Routes["routes/*<br/>REST API"]
+        Pools["pool-cache.js · crypto.js<br/>conn pools · AES-256-GCM"]
+    end
+
+    AppDB[("<b>MongoAdvisor app DB</b> · MongoDB<br/>clusters · topologies<br/>query_stats(+_hourly)<br/>slow_queries(+_hourly)<br/>index_stats · storage_stats<br/>disk_usage(+_hourly)<br/>oplog_window(+_hourly)<br/>monitor_logs · retention_state")]
+
+    Source[("<b>Source MongoDB</b><br/>replica set(s)<br/>P · S · S")]
+
+    Atlas["<b>MongoDB Atlas Admin API</b><br/>cloud.mongodb.com<br/>Performance Advisor"]
+
+    Browser -- "HTTP · REST + static" --> Backend
+    Backend -- "mongo wire · read-only<br/>metrics_reader" --> Source
+    Backend -- "HTTPS digest<br/>slow-query logs" --> Atlas
+    Backend <-- "mongo wire · R/W<br/>mongoadvisor_app" --> AppDB
 ```
 
-Slow-query log lines are fetched with the **Atlas Admin API** (keys in the
-UI), not the MongoDB database user on the arrow above.
+**Component boundaries:**
+
+| Component                | Process      | Storage     | Notes                                                                                              |
+| ------------------------ | ------------ | ----------- | -------------------------------------------------------------------------------------------------- |
+| **Frontend**             | Browser      | —           | Static assets served by the backend; talks to it over the same origin.                             |
+| **MongoAdvisor backend** | Node.js      | —           | Stateless; horizontal scaling is fine but pollers must run on one instance (leader-elect TODO).    |
+| **MongoAdvisor app DB**  | MongoDB      | persistent  | A separate cluster from the ones you monitor — sized per [docs/retention.md](docs/retention.md#cluster-sizing-for-the-mongoadvisor-app-db). |
+| **Source clusters**      | MongoDB      | (yours)     | Connected via per-cluster pools using the registered `metrics_reader` URI; never written to.        |
+| **Atlas control plane**  | external SaaS| —           | Optional; only used when an Atlas API key pair is registered for a cluster.                         |
+
+Slow-query log lines come from the **Atlas Admin API** path (keys held by
+the backend, never the source cluster), so dropping Atlas keys disables
+slow-log ingestion without affecting any other collector.
 
 ## Quick Start
 
