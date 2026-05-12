@@ -255,4 +255,6 @@ in-process. Full details, key rotation, and the
 
 ## License
 
-ISC — see [`package.json`](package.json).
+[ISC](https://opensource.org/license/isc-license-txt) — see
+[`LICENSE`](LICENSE). The same SPDX identifier is declared in
+[`package.json`](package.json) (`"license": "ISC"`).
