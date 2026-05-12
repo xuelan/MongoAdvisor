@@ -52,8 +52,8 @@ See [docs/workloads.md](workloads.md) for a per-workload-script breakdown.
 ## Unit tests
 
 The suite uses the built-in
-[`node --test`](https://nodejs.org/api/test.html) runner — **no extra dev
-dependencies**. Tests live in [`tests/`](../tests/) and are pure unit tests
+`[node --test](https://nodejs.org/api/test.html)` runner — **no extra dev
+dependencies**. Tests live in `[tests/](../tests/)` and are pure unit tests
 (no MongoDB connection required); they cover the read-path pipeline
 builders, the rollup delta-fold, the `$queryStats` version gate, the
 credential encryption helpers, and the hidden-DB filter.
@@ -63,35 +63,34 @@ npm test                                     # runs all tests
 node --test tests/metrics-pipeline.test.js   # one suite at a time
 ```
 
-| File                                    | What it covers                                                                                                                                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/metrics-pipeline.test.js`        | `buildQueryStatsPipelinePrefix` / `buildSlowQueriesPipelinePrefix` for the three time-filter cases (hot only, hybrid, **All**), plus the rollup → raw alias projection.                                |
-| `tests/retention-delta-fold.test.js`    | `sumPositiveDeltas` — monotonic growth, counter resets, repeated resets, non-numeric inputs, idle values; `floorToHour` and `addHours` arithmetic.                                                       |
-| `tests/discovery-version-gate.test.js`  | `supportsQueryStats` truth table for 6.x / 7.0 / 7.1 / 7.2 / 8.x and invalid / missing version arrays.                                                                                                  |
-| `tests/crypto.test.js`                  | AES-256-GCM encrypt + decrypt round-trip, `iv:tag:ciphertext` format, IV randomness, tamper rejection, format-validation rejection. `isEncrypted` truth table.                                          |
-| `tests/hidden-dbs.test.js`              | `isHiddenTopLevelDb` for system DBs, the app DB, the MCP scratch DB, workload DBs, case sensitivity, and null/undefined safety.                                                                          |
+
+| File                                   | What it covers                                                                                                                                                          |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/metrics-pipeline.test.js`       | `buildQueryStatsPipelinePrefix` / `buildSlowQueriesPipelinePrefix` for the three time-filter cases (hot only, hybrid, **All**), plus the rollup → raw alias projection. |
+| `tests/retention-delta-fold.test.js`   | `sumPositiveDeltas` — monotonic growth, counter resets, repeated resets, non-numeric inputs, idle values; `floorToHour` and `addHours` arithmetic.                      |
+| `tests/discovery-version-gate.test.js` | `supportsQueryStats` truth table for 6.x / 7.0 / 7.1 / 7.2 / 8.x and invalid / missing version arrays.                                                                  |
+| `tests/crypto.test.js`                 | AES-256-GCM encrypt + decrypt round-trip, `iv:tag:ciphertext` format, IV randomness, tamper rejection, format-validation rejection. `isEncrypted` truth table.          |
+| `tests/hidden-dbs.test.js`             | `isHiddenTopLevelDb` for system DBs, the app DB, the MCP scratch DB, workload DBs, case sensitivity, and null/undefined safety.                                         |
+
 
 The suite is fast (sub-second on a laptop) and runs without a network — it's
 safe to wire into a pre-commit hook or CI.
 
 **Currently uncovered** (good follow-up areas):
-[`src/collector.js`](../src/collector.js) (timestamp parsing, dedupe keys,
-queryStats hashing), [`src/server.js`](../src/server.js) HTTP handlers
+`[src/collector.js](../src/collector.js)` (timestamp parsing, dedupe keys,
+queryStats hashing), `[src/server.js](../src/server.js)` HTTP handlers
 (would need supertest + a fake `db` module), Atlas Performance Advisor
-parsing, [`scripts/*`](../scripts) orchestration. These all involve I/O so
+parsing, `[scripts/*](../scripts)` orchestration. These all involve I/O so
 they need either dependency injection or an integration-test setup.
 
 ## Roadmap
 
 1. **Poll delta vs. full for read and write.** Apply timestamp filtering
-   dynamically on `$queryStats` reads (writes can't be made delta-based);
+  dynamically on `$queryStats` reads (writes can't be made delta-based);
    expand `$queryStats` analytics with richer aggregations.
 2. **More indexes.** Add indexes for any new access patterns introduced by
-   future dashboards and API endpoints.
+  future dashboards and API endpoints.
 3. **Sharded cluster support.** Currently only replica sets are covered
-   end-to-end — Atlas `mongos` processes are filtered out by the collector.
-4. **Integration tests** — block `executionStats` against PROD with an env
-   gate + double-confirmation, and add HTTP-handler coverage on top of the
-   existing unit tests.
-5. **Express 5 upgrade follow-ups** — finish migrating any remaining
-   middleware patterns that assume Express 4 semantics.
+  end-to-end — Atlas `mongos` processes are filtered out by the collector.
+4. **Integration tests**
+

@@ -254,10 +254,27 @@ layer.
 
 ## Credential encryption
 
-Source cluster URIs and Atlas private API keys are **encrypted at rest**
-(AES-256-GCM) before storage in the backend database. Implementation:
+Source cluster URIs and Atlas private API keys go through
+**application-level encryption** (AES-256-GCM) in the Node backend
+**before** they reach the app DB. Implementation:
 [`src/crypto.js`](../src/crypto.js); unit tests in
 [`tests/crypto.test.js`](../tests/crypto.test.js).
+
+### What this is — and isn't
+
+| Pattern                                                                                                                                            | Where encryption happens               | Who holds the key                          | Used here? |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------ | ---------- |
+| **Application-level encryption** (this project)                                                                                                    | Node backend, before the wire          | Application env (`ENCRYPTION_KEY`)         | **Yes**    |
+| [MongoDB Encryption at Rest](https://www.mongodb.com/docs/manual/core/security-encryption-at-rest/)                                                | Storage engine (transparent to app)    | KMIP / cloud KMS / local key file          | Orthogonal (Atlas enables it by default at the disk layer; not part of this code) |
+| [Client-Side / Queryable Encryption](https://www.mongodb.com/docs/manual/core/queryable-encryption/)                                              | MongoDB driver (CSFLE / QE)            | Key-vault collection + KMS provider        | No         |
+
+So: the MongoDB server in the app DB only ever sees opaque
+`iv:authTag:ciphertext` strings for these two fields, and that ciphertext
+sits on top of whatever disk-level encryption your hosting provider
+applies — but the encryption is performed by the application, not by the
+database.
+
+### Field flow
 
 | Layer                | `uri`                         | `atlasPrivateKey`     |
 | -------------------- | ----------------------------- | --------------------- |
@@ -266,8 +283,9 @@ Source cluster URIs and Atlas private API keys are **encrypted at rest**
 | `GET /api/clusters`  | Masked                        | Partially masked      |
 
 - **Key**: 256-bit hex in `ENCRYPTION_KEY` (never commit `.env`).
-- **Per-value IV**: random 12 bytes per encrypt.
-- Rotating `ENCRYPTION_KEY` requires re-encrypting stored values.
+- **Per-value IV**: random 12 bytes per encrypt (GCM requires unique IVs per key).
+- **Auth tag**: 16 bytes — tamper detection; `decrypt()` throws on mismatch.
+- Rotating `ENCRYPTION_KEY` requires re-encrypting stored values (no in-place rotation helper yet).
 
 ## Decrypt a stored credential
 

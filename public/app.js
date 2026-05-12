@@ -47,8 +47,19 @@ function rebuildChart(existing, canvasId, config) {
   return new Chart(document.getElementById(canvasId), config);
 }
 
+// Chart.js v4 + chartjs-chart-treemap v3 sometimes leaves the last frame painted
+// on the canvas after `destroy()`. Force a pixel clear so empty time-range filters
+// don't leave stale charts visible.
 function destroyCharts(charts) {
-  for (const c of charts) { if (c) c.destroy(); }
+  for (const c of charts) {
+    if (!c) continue;
+    const canvas = c.canvas;
+    c.destroy();
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }
 }
 
 // ─── Health ─────────────────────────────────────────────────────────
@@ -232,8 +243,12 @@ function getChecked(selector) {
 function getSelectedDatabases() { return getChecked("#dbFilter"); }
 function getSelectedHosts() { return getChecked("#hostFilter"); }
 
+// Drive the time range from the active button (the hidden <select> only ever held
+// one option and silently ignored unknown values, so anything other than "1 hour"
+// was falling through with an empty string and bypassing the `since` filter).
 function getTimeRange() {
-  return document.getElementById("timeRange").value;
+  const active = document.querySelector("#timeRangeGroup .btn-filter.active");
+  return active ? active.dataset.val : "";
 }
 
 document.getElementById("timeRangeGroup").addEventListener("click", (e) => {
@@ -241,7 +256,6 @@ document.getElementById("timeRangeGroup").addEventListener("click", (e) => {
   if (!btn) return;
   document.querySelectorAll("#timeRangeGroup .btn-filter").forEach((b) => b.classList.remove("active"));
   btn.classList.add("active");
-  document.getElementById("timeRange").value = btn.dataset.val;
   loadMetrics();
 });
 
@@ -390,6 +404,7 @@ async function loadAppLoad() {
     const data = await res.json();
     if (!data.length) {
       destroyCharts([appLoadExecChart, appLoadTimeChart, slowestAppChart]);
+      appLoadExecChart = appLoadTimeChart = slowestAppChart = null;
       return;
     }
 
@@ -798,6 +813,7 @@ async function loadImpactChart() {
     const data = await res.json();
     if (!data.length) {
       destroyCharts([treemapIOChart, treemapCPUChart]);
+      treemapIOChart = treemapCPUChart = null;
       return;
     }
 

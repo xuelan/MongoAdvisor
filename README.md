@@ -245,13 +245,19 @@ transparently `$unionWith` the rollups for older ranges — see
 
 ## Security
 
-Source cluster URIs and Atlas private API keys are **encrypted at rest**
-(AES-256-GCM, per-value 12-byte IV) before storage in the backend database.
-The `GET /api/clusters` endpoint always returns masked / partial values; the
-plaintext lives only in `POST /api/clusters` request bodies and decrypted
-in-process. Full details, key rotation, and the
+Source cluster URIs and Atlas private API keys go through
+**application-level encryption** (AES-256-GCM, per-value 12-byte IV) in
+the Node backend before they ever reach the app DB — the MongoDB server
+only ever sees opaque `iv:tag:ciphertext` strings. This is **distinct
+from** MongoDB's
+[Encryption at Rest](https://www.mongodb.com/docs/manual/core/security-encryption-at-rest/)
+(storage-engine level, transparent to the application) and from
+[Client-Side / Queryable Encryption](https://www.mongodb.com/docs/manual/core/queryable-encryption/)
+(driver-managed with a key-vault and schema). `GET /api/clusters` returns
+masked values; plaintext lives only in `POST /api/clusters` request
+bodies and is decrypted in-process. Full details, key rotation, and the
 `npm run decrypt:field` recovery script:
-[docs/setup.md — Credential encryption](docs/setup.md#credential-encryption).
+[docs/setup.md — Credential encryption](docs/setup.md).
 
 ## License
 
