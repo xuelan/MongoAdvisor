@@ -1,4 +1,43 @@
+# Dependencies
 node_modules/
+
+# Secrets & local env (keep .env.example tracked)
 .env
-.DS_Store
+.env.*
+!.env.example
+
+# Local scratch & customer cluster dumps (getMongoData uploads, experiments)
 tmp/
+
+# Cursor / IDE (optional local AI rules — not required to run MongoAdvisor)
+.cursor/
+
+# Editor
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs & diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / coverage (future CI)
+coverage/
+.nyc_output/
+
+# Credentials & key material (Atlas bootstrap, OAuth, TLS)
+*.pem
+*.key
+*.p12
+gcp-oauth.keys.json
+*-oauth.keys.json
