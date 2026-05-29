@@ -1,6 +1,6 @@
 {
   "name": "mongoadvisor",
-  "version": "0.1.0",
+  "version": "0.1.0-beta",
   "description": "Observability tool for MongoDB clusters",
   "main": "src/server.js",
   "scripts": {

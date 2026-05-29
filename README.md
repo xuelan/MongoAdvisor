@@ -1,12 +1,23 @@
 # MongoAdvisor
 
+**Version:** `0.1.0-beta` — public beta; APIs and behavior may change without notice.
+
+> **Community project — not an official MongoDB product.** MongoAdvisor is an
+> independent open-source tool maintained by its contributors. It is **not**
+> affiliated with, endorsed by, or supported by MongoDB, Inc. Use it **at your
+> own risk** — there is no warranty, SLA, or official support channel. For
+> production deployments, review [Security](#security) below and track the
+> [roadmap](docs/development.md#roadmap) (authentication and hardening are
+> planned, not shipped yet).
+
 MongoAdvisor rethinks MongoDB observability. Instead of yet another raw-metrics
 dashboard or auditing tool, it continuously analyzes your clusters and delivers
 **actionable recommendations** with direct links to the exact playbook —
 turning insight into action in seconds, not hours. So you can keep innovating
 and scaling.
 
-> **Status & scope.** MongoAdvisor is **under active development**. It does
+> **Status & scope.** MongoAdvisor is in **public beta** (`0.1.x-beta`) and
+> **under active development**. It does
 > **not** replace
 > [Atlas Metrics](https://www.mongodb.com/docs/atlas/monitoring-alerts/) or
 > [Atlas Performance Advisor](https://www.mongodb.com/docs/atlas/performance-advisor/) —
@@ -258,6 +269,14 @@ transparently `$unionWith` the rollups for older ranges — see
 [docs/retention.md](docs/retention.md).
 
 ## Security
+
+### Current beta limitations
+
+The dashboard and REST API ship **without authentication** in v0.1 beta.
+Anyone who can reach the HTTP port can register clusters, read metrics, and
+invoke admin helpers. **Run on localhost only** or place the service behind a
+reverse proxy with your own auth until [dashboard authentication](docs/development.md#roadmap)
+lands on the roadmap.
 
 Source cluster URIs and Atlas private API keys go through
 **application-level encryption** (AES-256-GCM, per-value 12-byte IV) in

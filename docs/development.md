@@ -4,6 +4,7 @@ Project layout, unit tests, and roadmap.
 
 - [Project structure](#project-structure)
 - [Unit tests](#unit-tests)
+- [Versioning](#versioning)
 - [Roadmap](#roadmap)
 
 ## Project structure
@@ -83,15 +84,33 @@ queryStats hashing), `[src/server.js](../src/server.js)` HTTP handlers
 parsing, `[scripts/*](../scripts)` orchestration. These all involve I/O so
 they need either dependency injection or an integration-test setup.
 
+## Versioning
+
+| Label | Meaning |
+| ----- | ------- |
+| **`0.1.x-beta`** | Public beta — feature-complete enough to try; breaking changes and missing auth expected. |
+| **`0.2.0`** (planned) | Target for dashboard/API authentication and baseline security hardening. |
+| **`1.0.0`** (future) | Stable API and production-oriented deployment story. |
+
+Release tags on GitHub should match `package.json` (e.g. `v0.1.0-beta`).
+
 ## Roadmap
 
-1. **Poll delta vs. full for read and write.** Apply timestamp filtering
+Beta releases follow **`0.1.x-beta`** semver until authentication and core
+security hardening ship; then the project will move toward **`0.2.0`**.
+
+1. **Dashboard & API authentication.** Login for the UI and REST API (session or
+   token-based), optional RBAC, and safe defaults when binding beyond localhost.
+2. **Security hardening.** Audit surface area (CORS, cluster registration,
+   Atlas key handling), `SECURITY.md` reporting path, dependency scanning in CI,
+   and deployment guidance (TLS termination, network isolation, secrets management).
+3. **Poll delta vs. full for read and write.** Apply timestamp filtering
   dynamically on `$queryStats` reads (writes can't be made delta-based);
    expand `$queryStats` analytics with richer aggregations.
-2. **More indexes.** Add indexes for any new access patterns introduced by
+4. **More indexes.** Add indexes for any new access patterns introduced by
   future dashboards and API endpoints.
-3. **Sharded cluster support.** Currently only replica sets are covered
+5. **Sharded cluster support.** Currently only replica sets are covered
   end-to-end — Atlas `mongos` processes are filtered out by the collector.
-4. **Integration tests**
-5. Report recommendations to improve
+6. **Integration tests**
+7. **Report recommendations** — expand offline audit output and actionable fixes.
 
