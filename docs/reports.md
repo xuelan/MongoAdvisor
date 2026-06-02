@@ -107,5 +107,9 @@ self-contained `.html`:
 - Heavy WiredTiger counters are slimmed out of the embedded payload
   (the full raw EJSON stays in `reports_raw` on the server). A 161-
   collection capture downloads as ~370 KB.
+- Per-collection WiredTiger cache for the **Collections** tab pie chart
+  (`wiredTiger.cache."bytes currently in the cache"`) is kept in the embed;
+  if the stored report is missing it, download backfills from `reports_raw`
+  before slimming.
 
 Open the file directly from disk — no network, no server.

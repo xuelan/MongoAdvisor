@@ -38,6 +38,28 @@
           </div>
         </div>
 
+        <div class="report-gmd-guide" aria-labelledby="reportGmdGuideTitle">
+          <h3 id="reportGmdGuideTitle" class="report-gmd-guide-title">How to run getMongoData</h3>
+          <p class="report-gmd-guide-lead">
+            Capture one JSON file <strong>per node</strong> (every replica-set member — PRIMARY and each secondary).
+            For a sharded cluster, run on <strong>each mongos</strong> and, for host-level checks, on each shard replica-set member too.
+            Script and details:
+            <a href="https://github.com/mongodb/support-tools/tree/master/getMongoData" target="_blank" rel="noopener">mongodb/support-tools — getMongoData</a>.
+          </p>
+          <ol class="report-gmd-steps">
+            <li>
+              Download the script once (or clone the repo):
+              <pre class="report-gmd-pre" spellcheck="false">curl -fsSLO https://raw.githubusercontent.com/mongodb/support-tools/master/getMongoData/getMongoData.js</pre>
+            </li>
+            <li>
+              On <strong>each</strong> <code>mongod</code> (or <code>mongos</code>), run against that member’s connection string and label the output by hostname:
+              <pre class="report-gmd-pre" spellcheck="false">mongosh "mongodb://USER:PASS@HOST:PORT/admin" --quiet getMongoData.js &gt; getMongoData-&lt;hostname&gt;.json</pre>
+              <span class="report-gmd-note">Legacy <code>mongo</code> shell: add <code>--norc</code> before the script path. Requires <code>readAnyDatabase</code>, <code>clusterMonitor</code>, and <code>backup</code> roles (see the script README).</span>
+            </li>
+            <li>Upload all <code>.json</code> / <code>.log</code> files below — MongoAdvisor groups them by replica-set name and runs eight checks.</li>
+          </ol>
+        </div>
+
         <form id="reportUploadForm" class="report-upload-form" enctype="multipart/form-data">
           <label class="report-drop-zone" id="reportDropZone">
             <input type="file" id="reportFiles" name="files" accept="application/json,.json,.log,.js" multiple hidden>
@@ -133,6 +155,7 @@
       </section>
 
       <section class="card report-tab" data-tab-pane="nodes" hidden>
+        <div id="nodesFindings" class="report-tab-findings" hidden></div>
         <h2>Nodes</h2>
         <div id="nodesContent"></div>
       </section>
@@ -156,8 +179,16 @@
       </section>
 
       <section class="card report-tab" data-tab-pane="collections" hidden>
+        <div class="report-cache-chart-row">
+          <h2>WiredTiger cache <span class="subtitle">top 10 collections — collStats</span></h2>
+          <canvas id="chartCollectionCache" class="report-chart-canvas"></canvas>
+          <p id="chartCollectionCacheEmpty" class="report-muted" hidden>
+            No per-collection cache bytes in this report (<code>wiredTiger.cache."bytes currently in the cache"</code>).
+          </p>
+        </div>
         <h2>Collections <span class="subtitle">top 30 by storage size — color = fragmentation</span></h2>
         <canvas id="chartCollections" class="report-chart-canvas"></canvas>
+        <div id="collectionsFindings" class="report-tab-findings" hidden></div>
         <div class="storage-table-wrap">
           <table class="storage-table" id="collectionsTable">
             <thead>
@@ -170,6 +201,7 @@
                 <th class="th-highlight">Frag %</th>
                 <th>Index size</th>
                 <th>Indexes</th>
+                <th>Idx/Data %</th>
               </tr>
             </thead>
             <tbody id="collectionsBody"></tbody>
@@ -178,8 +210,11 @@
       </section>
 
       <section class="card report-tab" data-tab-pane="indexes" hidden>
-        <h2>Indexes <span class="subtitle">grouped by namespace</span></h2>
-        <canvas id="chartIndexes" class="report-chart-canvas"></canvas>
+        <div class="report-index-chart-row">
+          <h2>Indexes <span class="subtitle">grouped by namespace</span></h2>
+          <canvas id="chartIndexes" class="report-chart-canvas"></canvas>
+        </div>
+        <div id="indexesFindings" class="report-tab-findings" hidden></div>
         <div id="indexesContent"></div>
       </section>
 

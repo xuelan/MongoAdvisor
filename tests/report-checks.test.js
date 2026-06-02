@@ -6,6 +6,7 @@ const path = require("node:path");
 const { parse, normalize } = require("../src/report/parser");
 const { group } = require("../src/report/grouper");
 const { runAll, summarize } = require("../src/report/checks");
+const clusterCheck = require("../src/report/checks/cluster");
 
 // See tests/report-parser.test.js for fixture conventions. Tests that need the fixture
 // skip gracefully when it's not present.
@@ -61,6 +62,49 @@ test("ClusterItem reports oplog window when below threshold", { skip: SAMPLE ? f
     findings.some((f) => /oplog window/i.test(f.title)),
     "small oplog window should trigger a ClusterItem finding",
   );
+});
+
+test("ClusterItem Atlas oplog guidance links docs without CLI or API snippets", () => {
+  const findings = clusterCheck.run({
+    groups: [
+      {
+        setName: "atlas-example",
+        nodes: [
+          {
+            host: "cluster0-shard-00-00.abc.mongodb.net:27017",
+            normalized: {
+              replicaSet: {
+                status: {
+                  members: [
+                    {
+                      name: "cluster0-shard-00-00.abc.mongodb.net:27017",
+                      stateStr: "PRIMARY",
+                      optimeDate: "2026-01-01T00:00:00.000Z",
+                    },
+                  ],
+                },
+                info: {
+                  timeDiffHours: 6,
+                  logSizeMB: 1000,
+                  usedMB: 500,
+                },
+              },
+            },
+          },
+        ],
+      },
+    ],
+  }, { ClusterItem: { oplog_window_hours: 48 } });
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].platform, "atlas");
+  assert.equal(findings[0].actions.length, 0);
+  assert.equal(
+    findings[0].docs,
+    "https://www.mongodb.com/docs/atlas/customize-storage/#std-label-oplog-size-behavior/",
+  );
+  assert.match(findings[0].description, /storage auto-scaling/i);
+  assert.doesNotMatch(findings[0].description, /Atlas CLI|Admin API|Additional Settings|UI path/i);
 });
 
 test("summarize aggregates counts by severity", { skip: SAMPLE ? false : SKIP_MSG }, () => {

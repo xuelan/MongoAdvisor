@@ -41,6 +41,52 @@
     if (n == null) return "—";
     return Number(n).toLocaleString();
   }
+  function mbToBytes(mb) {
+    return Math.round(Number(mb || 0) * 1024 * 1024);
+  }
+  function fmtBytes(b) {
+    const n = Number(b);
+    if (!Number.isFinite(n) || n < 0) return "—";
+    if (n === 0) return "0 B";
+    if (n >= 1_073_741_824) {
+      const gb = n / 1_073_741_824;
+      return (gb >= 100 ? gb.toFixed(0) : gb >= 10 ? gb.toFixed(1) : gb.toFixed(2)) + " GB";
+    }
+    if (n >= 1_048_576) {
+      const mb = n / 1_048_576;
+      return (mb >= 100 ? mb.toFixed(0) : mb.toFixed(1)) + " MB";
+    }
+    if (n >= 1024) return (n / 1024).toFixed(1) + " KB";
+    return Math.round(n) + " B";
+  }
+  const STORAGE_TABLE_PAGE_SIZE = 10;
+  const COLLECTION_STORAGE_COLUMNS = [
+    { key: "ns", label: "Collection" },
+    { key: "count", label: "Docs" },
+    { key: "dataSize", label: "Data Size" },
+    { key: "storageSize", label: "Storage Size" },
+    { key: "reusable", label: "Reusable", highlight: true },
+    { key: "fragPct", label: "Frag %", highlight: true },
+    { key: "totalIndexSize", label: "Index Size" },
+    { key: "indexCount", label: "Indexes" },
+    { key: "indexToDataRatioPct", label: "Idx/Data %" },
+  ];
+  function fragClassPct(pct) {
+    if (pct >= 50) return "frag-high";
+    if (pct >= 25) return "frag-med";
+    return "";
+  }
+  function idxRatioClassPct(pct) {
+    if (pct >= 20) return "frag-high";
+    if (pct >= 10) return "frag-med";
+    return "";
+  }
+  function reusableClassMb(mb) {
+    const bytes = mbToBytes(mb);
+    if (bytes >= 100_000_000) return "reusable-high";
+    if (bytes >= 10_000_000) return "reusable-med";
+    return "";
+  }
   function fmtDate(d) {
     if (!d) return "—";
     const t = new Date(d).getTime();
@@ -91,8 +137,9 @@
     return node;
   }
   function drawSvgDoughnut(canvas, spec) {
-    const w = canvas.clientWidth || 320;
-    const h = canvas.clientHeight || 220;
+    const fmt = spec.formatValue || ((v) => String(v));
+    const w = chartHostWidth(canvas, 320);
+    const h = Math.max(220, canvas.clientHeight || 220);
     const svg = svgEl("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
     const cx = w / 2, cy = h / 2, r = Math.min(w, h) / 2 - 24, ir = r * 0.55;
     const total = spec.values.reduce((a, b) => a + (b || 0), 0) || 1;
@@ -111,15 +158,21 @@
       const fill = (spec.colors && spec.colors[i]) || PALETTE[i % PALETTE.length];
       svg.appendChild(svgEl("path", { d, fill }));
     });
-    // Center label = total
-    const txt = svgEl("text", { x: cx, y: cy + 6, "text-anchor": "middle", fill: "#e0e0e0", "font-size": "1rem", "font-weight": "600" });
-    txt.textContent = String(total);
+    // Center label = formatted total (e.g. 12.4 GB, not raw bytes)
+    const txt = svgEl("text", { x: cx, y: cy + 4, "text-anchor": "middle", fill: "#e0e0e0", "font-size": "1rem", "font-weight": "600" });
+    txt.textContent = fmt(total);
     svg.appendChild(txt);
+    if (spec.formatValue) {
+      const sub = svgEl("text", { x: cx, y: cy + 18, "text-anchor": "middle", fill: "#8899a6", "font-size": "0.65rem" });
+      sub.textContent = "total";
+      svg.appendChild(sub);
+    }
     // Legend below
     const legend = el("div", { class: "report-chart-legend" });
     spec.labels.forEach((lbl, i) => {
       const sw = el("span", { class: "rcl-sw", style: `background:${(spec.colors && spec.colors[i]) || PALETTE[i % PALETTE.length]}` });
-      legend.appendChild(el("span", { class: "rcl-item" }, sw, ` ${lbl} (${spec.values[i] || 0})`));
+      const val = spec.values[i] || 0;
+      legend.appendChild(el("span", { class: "rcl-item" }, sw, ` ${lbl} (${fmt(val)})`));
     });
     const wrap = canvas.parentElement;
     canvas.style.display = "none";
@@ -128,13 +181,34 @@
     out.appendChild(legend);
     wrap.appendChild(out);
   }
+  function prepareChartHost(canvas) {
+    if (!canvas) return;
+    const wrap = canvas.parentElement;
+    wrap?.querySelector(".report-chart-fallback")?.remove();
+    canvas.style.display = "";
+  }
+
+  function chartHostWidth(canvas, fallback = 480) {
+    if (!canvas) return fallback;
+    const rectW = canvas.getBoundingClientRect().width;
+    if (rectW >= 40) return Math.floor(rectW);
+    const cw = canvas.clientWidth;
+    if (cw >= 40) return cw;
+    const pane = canvas.closest("[data-tab-pane]");
+    if (pane && !pane.hidden) {
+      const pw = pane.getBoundingClientRect().width;
+      if (pw >= 40) return Math.floor(pw - 24);
+    }
+    return fallback;
+  }
+
   function drawSvgHBars(canvas, spec) {
     const rowH = 22, gap = 6;
     const labels = spec.labels.slice(0, spec.maxRows || 20);
     const values = spec.values.slice(0, labels.length);
     const colors = spec.colors || labels.map((_, i) => PALETTE[i % PALETTE.length]);
     const max = Math.max(1, ...values);
-    const w = canvas.clientWidth || 480;
+    const w = chartHostWidth(canvas, 480);
     const h = labels.length * (rowH + gap) + 12;
     const labelW = Math.min(220, Math.max(60, w * 0.35));
     // Reserve a value gutter on the right so the longest bar's value label
@@ -173,20 +247,98 @@
     wrap.appendChild(out);
   }
 
+  function drawSvgStackedHBars(canvas, spec) {
+    const fmt = spec.formatValue || ((v) => String(v));
+    const rowH = 22, gap = 6;
+    const labels = spec.labels.slice(0, spec.maxRows || 25);
+    const datasets = (spec.datasets || []).slice();
+    const n = labels.length;
+    if (n === 0 || datasets.length === 0) return;
+    const rowTotals = labels.map((_, i) =>
+      datasets.reduce((acc, d) => acc + (Number(d.data[i]) || 0), 0),
+    );
+    const max = Math.max(1, ...rowTotals);
+    const w = chartHostWidth(canvas, 520);
+    const h = n * (rowH + gap) + 12;
+    const labelW = Math.min(220, Math.max(60, w * 0.35));
+    const valueGutter = 56;
+    const rightPad = 8;
+    const barAreaW = Math.max(40, w - labelW - rightPad - valueGutter);
+    const svg = svgEl("svg", { width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+    labels.forEach((lbl, i) => {
+      const y = i * (rowH + gap) + 6;
+      const lblText = svgEl("text", {
+        x: labelW - 6, y: y + rowH - 6, "text-anchor": "end", fill: "#8899a6", "font-size": "0.72rem",
+      });
+      lblText.textContent = lbl.length > 32 ? lbl.slice(0, 31) + "…" : lbl;
+      svg.appendChild(lblText);
+      svg.appendChild(svgEl("rect", { x: labelW, y, width: barAreaW, height: rowH, fill: "#0f1923", rx: 4 }));
+      const total = rowTotals[i] || 0;
+      const barTotalW = total > 0 ? (total / max) * barAreaW : 0;
+      let xOff = labelW;
+      datasets.forEach((ds) => {
+        const v = Number(ds.data[i]) || 0;
+        if (v <= 0 || total <= 0) return;
+        const segW = Math.max(1, (v / total) * barTotalW);
+        svg.appendChild(svgEl("rect", {
+          x: xOff, y, width: segW, height: rowH,
+          fill: ds.backgroundColor || PALETTE[0], rx: 0,
+        }));
+        xOff += segW;
+      });
+      const vText = svgEl("text", {
+        x: labelW + barTotalW + 6, y: y + rowH - 6, fill: "#e0e0e0", "font-size": "0.72rem",
+      });
+      vText.textContent = fmt(total);
+      svg.appendChild(vText);
+    });
+    const legend = el("div", { class: "report-chart-legend" });
+    datasets.forEach((ds) => {
+      const sw = el("span", {
+        class: "rcl-sw",
+        style: `background:${ds.backgroundColor || PALETTE[0]}`,
+      });
+      legend.appendChild(el("span", { class: "rcl-item" }, sw, ` ${ds.label || "Series"}`));
+    });
+    canvas.style.display = "none";
+    const wrap = canvas.parentElement;
+    const out = el("div", { class: "report-chart-fallback" });
+    out.appendChild(svg);
+    out.appendChild(legend);
+    wrap.appendChild(out);
+  }
+
+  function renderChartDeferred(canvas, spec, attempt = 0) {
+    if (!canvas) return;
+    const width = canvas.getBoundingClientRect().width || canvas.clientWidth;
+    if (width >= 40 || attempt > 8) {
+      renderChart(canvas, spec);
+      return;
+    }
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => renderChartDeferred(canvas, spec, attempt + 1));
+    } else {
+      renderChart(canvas, spec);
+    }
+  }
+
   // ─── dual-renderer abstraction ───
   function renderChart(canvas, spec) {
     if (!canvas) return;
+    prepareChartHost(canvas);
     // Online: Chart.js is loaded.
     if (typeof window.Chart !== "undefined") {
       const ctx = canvas.getContext("2d");
       if (spec.kind === "doughnut") {
-        return new window.Chart(ctx, {
+        const fmtVal = spec.formatValue || ((v) => String(v));
+        const colors = spec.labels.map((_, i) => (spec.colors && spec.colors[i]) || PALETTE[i % PALETTE.length]);
+        return trackChart(new window.Chart(ctx, {
           type: "doughnut",
           data: {
             labels: spec.labels,
             datasets: [{
               data: spec.values,
-              backgroundColor: spec.colors || PALETTE,
+              backgroundColor: colors,
               borderColor: "#162330",
               borderWidth: 2,
             }],
@@ -195,14 +347,27 @@
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-              legend: { labels: { color: "#e0e0e0", font: { size: 12 } } },
+              legend: {
+                position: "right",
+                labels: { color: "#e0e0e0", font: { size: 12 }, boxWidth: 12, padding: 8 },
+              },
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => {
+                    const v = ctx.parsed ?? ctx.raw;
+                    const sum = ctx.chart.data.datasets[0].data.reduce((a, b) => a + (b || 0), 0) || 1;
+                    const pct = ((Number(v) / sum) * 100).toFixed(1);
+                    return ` ${ctx.label}: ${fmtVal(v)} (${pct}%)`;
+                  },
+                },
+              },
             },
           },
-        });
+        }));
       }
       if (spec.kind === "hbar") {
         const fmt = spec.formatValue || ((v) => String(v));
-        return new window.Chart(ctx, {
+        return trackChart(new window.Chart(ctx, {
           type: "bar",
           data: {
             labels: spec.labels,
@@ -236,11 +401,11 @@
               y: { ticks: { color: "#8899a6" }, grid: { display: false } },
             },
           },
-        });
+        }));
       }
       if (spec.kind === "stackedBar") {
         const fmt = spec.formatValue || ((v) => String(v));
-        return new window.Chart(ctx, {
+        return trackChart(new window.Chart(ctx, {
           type: "bar",
           data: { labels: spec.labels, datasets: spec.datasets },
           options: {
@@ -267,22 +432,14 @@
               y: { stacked: true, ticks: { color: "#8899a6" }, grid: { display: false } },
             },
           },
-        });
+        }));
       }
     }
     // Offline: inline SVG fallback.
     if (spec.kind === "doughnut") return drawSvgDoughnut(canvas, spec);
     if (spec.kind === "hbar") return drawSvgHBars(canvas, spec);
     if (spec.kind === "stackedBar") {
-      // Flatten into one bar with sum, color by first dataset — keep offline simple.
-      const sum = spec.labels.map((_, i) =>
-        spec.datasets.reduce((acc, d) => acc + (d.data[i] || 0), 0),
-      );
-      return drawSvgHBars(canvas, {
-        labels: spec.labels,
-        values: sum,
-        colors: spec.labels.map(() => spec.datasets[0]?.backgroundColor || PALETTE[0]),
-      });
+      return drawSvgStackedHBars(canvas, spec);
     }
   }
 
@@ -463,15 +620,21 @@
           const wt = s.wiredTiger || {};
           const reusableMb = Number(wt["block-manager"]?.["file bytes available for reuse"] || 0) / 1024 / 1024;
           const frag = storageMb > 0 ? reusableMb / storageMb : 0;
+          const dataSizeMb = Number(s.size || 0);
+          const totalIndexMb = Number(s.totalIndexSize || 0);
           out.push({
             ns,
             count: Number(s.count || 0),
-            dataSize: Number(s.size || 0),
+            dataSize: dataSizeMb,
             storageSize: storageMb,
             reusable: reusableMb,
             fragmentation: frag,
-            totalIndexSize: Number(s.totalIndexSize || 0),
+            fragPct: storageMb > 0 ? Math.round(frag * 1000) / 10 : 0,
+            totalIndexSize: totalIndexMb,
             indexCount: (coll.indexes || []).length,
+            indexToDataRatioPct: dataSizeMb > 0
+              ? Math.round((totalIndexMb / dataSizeMb) * 1000) / 10
+              : 0,
           });
         }
       }
@@ -484,6 +647,242 @@
     if (frag >= 0.3) return "#ffb020";
     if (frag >= 0.1) return "#00a3ff";
     return "#00ed64";
+  }
+
+  function wtCacheBytes(wt) {
+    const n = Number(wt?.cache?.["bytes currently in the cache"]);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  function shortChartLabel(text, maxLen) {
+    const max = maxLen || 32;
+    const s = String(text || "");
+    if (s.length <= max) return s;
+    return `…${s.slice(-(max - 1))}`;
+  }
+
+  function aggregateCollectionCache(report) {
+    const byNs = new Map();
+    for (const entry of report.normalized || []) {
+      const dbs = entry?.normalized?.databases || [];
+      for (const db of dbs) {
+        for (const coll of db.collections) {
+          const s = coll.stats;
+          if (!s) continue;
+          const ns = s.ns || `${db.name}.${coll.name}`;
+          const bytes = wtCacheBytes(s.wiredTiger);
+          const prev = byNs.get(ns);
+          if (!prev || bytes > prev.bytes) {
+            byNs.set(ns, { ns, bytes });
+          }
+        }
+      }
+    }
+    return Array.from(byNs.values())
+      .filter((row) => row.bytes > 0)
+      .sort((a, b) => b.bytes - a.bytes);
+  }
+
+  const TAB_FINDING_GROUPS = {
+    // Cluster + Security stay on Overview only.
+    nodes: ["Host info", "Build info", "Server status", "Sharding"],
+    collections: ["Collections"],
+    indexes: ["Indexes"],
+  };
+
+  let activeReport = null;
+  const builtTabs = new Set();
+
+  const reportCharts = [];
+
+  function destroyReportCharts() {
+    for (const ch of reportCharts) {
+      try {
+        ch.destroy();
+      } catch (_) { /* ignore */ }
+    }
+    reportCharts.length = 0;
+  }
+
+  function trackChart(instance) {
+    if (instance) reportCharts.push(instance);
+    return instance;
+  }
+
+  function renderCachePie(canvas, emptyEl, rows, emptyMessage) {
+    if (!canvas) return;
+    const wrap = canvas.parentElement;
+    const existing = wrap?.querySelector(".report-chart-fallback");
+    if (existing) existing.remove();
+    canvas.style.display = "";
+    if (emptyEl) {
+      if (emptyMessage) emptyEl.textContent = emptyMessage;
+      emptyEl.hidden = rows.length > 0;
+    }
+    if (rows.length === 0) {
+      canvas.style.display = "none";
+      return;
+    }
+    renderChart(canvas, {
+      kind: "doughnut",
+      labels: rows.map((r) => shortChartLabel(r.label || r.ns)),
+      values: rows.map((r) => r.bytes),
+      formatValue: (v) => fmtBytes(v),
+    });
+  }
+
+  function buildCollectionCacheChart(report) {
+    const colls = aggregateCollectionCache(report).slice(0, 10).map((r) => ({
+      ns: r.ns,
+      label: r.ns,
+      bytes: r.bytes,
+    }));
+    renderCachePie(
+      $("#chartCollectionCache"),
+      $("#chartCollectionCacheEmpty"),
+      colls,
+      null,
+    );
+  }
+
+  function appendCollectionStorageRow(tr, c) {
+    const fragPct = c.fragPct ?? (c.storageSize > 0 ? Math.round(c.fragmentation * 1000) / 10 : 0);
+    const idxRatio = c.indexToDataRatioPct ?? (c.dataSize > 0
+      ? Math.round((c.totalIndexSize / c.dataSize) * 1000) / 10
+      : 0);
+    tr.appendChild(el("td", { class: "st-ns" }, c.ns));
+    tr.appendChild(el("td", null, fmtInt(c.count)));
+    tr.appendChild(el("td", null, fmtBytes(mbToBytes(c.dataSize))));
+    tr.appendChild(el("td", null, fmtBytes(mbToBytes(c.storageSize))));
+    tr.appendChild(el("td", { class: `st-reusable ${reusableClassMb(c.reusable)}` }, fmtBytes(mbToBytes(c.reusable))));
+    tr.appendChild(el("td", { class: `st-frag ${fragClassPct(fragPct)}` }, c.storageSize > 0 ? `${fragPct}%` : "—"));
+    tr.appendChild(el("td", null, fmtBytes(mbToBytes(c.totalIndexSize))));
+    if (c.indexCount > 10) {
+      const tdIdx = el("td");
+      tdIdx.appendChild(el("span", { class: "frag-high" }, String(c.indexCount)));
+      tr.appendChild(tdIdx);
+    } else {
+      tr.appendChild(el("td", null, String(c.indexCount)));
+    }
+    tr.appendChild(el("td", { class: idxRatioClassPct(idxRatio) }, `${idxRatio}%`));
+  }
+
+  /**
+   * Storage table matching the live dashboard layout (sortable headers, optional pager).
+   * @param {object[]} rows — from aggregateCollections()
+   * @param {{ flaggedNs?: Set<string>, paginated?: boolean, caption?: string }} opts
+   */
+  function mountCollectionsStorageTable(rows, opts) {
+    const options = opts || {};
+    if (!rows.length) {
+      const empty = el("div", { class: "storage-table-wrap report-findings-storage-table" });
+      if (options.caption) {
+        empty.appendChild(el("p", { class: "report-storage-table-caption" }, options.caption));
+      }
+      empty.appendChild(el("p", { class: "report-muted" }, "No collection storage data in this report."));
+      return empty;
+    }
+    const flaggedNs = options.flaggedNs || new Set();
+    const paginated = options.paginated !== false;
+    let sortKey = "storageSize";
+    let sortAsc = false;
+    let page = 0;
+    const thNodes = new Map();
+
+    const wrap = el("div", { class: "storage-table-wrap report-findings-storage-table" });
+    if (options.caption) {
+      wrap.appendChild(el("p", { class: "report-storage-table-caption" }, options.caption));
+    }
+    const table = el("table", { class: "storage-table" });
+    const thead = el("thead");
+    const headTr = el("tr");
+    for (const col of COLLECTION_STORAGE_COLUMNS) {
+      const th = el("th", {
+        class: col.highlight ? "th-highlight" : undefined,
+      }, col.label);
+      thNodes.set(col.key, th);
+      th.addEventListener("click", () => {
+        if (sortKey === col.key) sortAsc = !sortAsc;
+        else {
+          sortKey = col.key;
+          sortAsc = col.key === "ns";
+        }
+        page = 0;
+        render();
+      });
+      headTr.appendChild(th);
+    }
+    thead.appendChild(headTr);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    const pager = el("div", { class: "storage-pager" });
+    pager.hidden = true;
+    wrap.appendChild(pager);
+
+    function updateSortIndicators() {
+      thNodes.forEach((th, key) => {
+        th.classList.remove("sorted-asc", "sorted-desc");
+        if (key === sortKey) th.classList.add(sortAsc ? "sorted-asc" : "sorted-desc");
+      });
+    }
+
+    function render() {
+      tbody.innerHTML = "";
+      const sorted = [...rows].sort((a, b) => {
+        const av = a[sortKey];
+        const bv = b[sortKey];
+        if (typeof av === "string") {
+          return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+        }
+        return sortAsc ? (av || 0) - (bv || 0) : (bv || 0) - (av || 0);
+      });
+      const totalPages = paginated
+        ? Math.max(1, Math.ceil(sorted.length / STORAGE_TABLE_PAGE_SIZE))
+        : 1;
+      if (page >= totalPages) page = totalPages - 1;
+      if (page < 0) page = 0;
+      const start = paginated ? page * STORAGE_TABLE_PAGE_SIZE : 0;
+      const slice = paginated
+        ? sorted.slice(start, start + STORAGE_TABLE_PAGE_SIZE)
+        : sorted;
+      for (const c of slice) {
+        const tr = el("tr");
+        if (flaggedNs.has(c.ns)) tr.className = "report-storage-row-flagged";
+        appendCollectionStorageRow(tr, c);
+        tbody.appendChild(tr);
+      }
+      updateSortIndicators();
+      if (!paginated || totalPages <= 1) {
+        pager.hidden = true;
+        pager.innerHTML = "";
+        return;
+      }
+      pager.hidden = false;
+      pager.innerHTML = "";
+      const prev = el("button", {
+        type: "button",
+        class: "btn-page",
+        disabled: page === 0,
+        onclick: () => { page -= 1; render(); },
+      }, "‹ Prev");
+      const next = el("button", {
+        type: "button",
+        class: "btn-page",
+        disabled: page >= totalPages - 1,
+        onclick: () => { page += 1; render(); },
+      }, "Next ›");
+      pager.appendChild(prev);
+      pager.appendChild(el("span", { class: "page-info" },
+        `${page + 1} / ${totalPages} `,
+        el("span", { class: "page-total" }, `(${sorted.length} rows)`),
+      ));
+      pager.appendChild(next);
+    }
+
+    render();
+    return wrap;
   }
 
   function buildStorageChart(report) {
@@ -511,18 +910,7 @@
     body.innerHTML = "";
     for (const c of colls) {
       const tr = el("tr");
-      tr.appendChild(el("td", null, c.ns));
-      tr.appendChild(el("td", null, fmtInt(c.count)));
-      tr.appendChild(el("td", null, fmtBytesMb(c.dataSize)));
-      tr.appendChild(el("td", null, fmtBytesMb(c.storageSize)));
-      tr.appendChild(el("td", null, fmtBytesMb(c.reusable)));
-      const frag = c.storageSize > 0 ? (c.fragmentation * 100).toFixed(0) + "%" : "—";
-      const tdF = el("td", null, frag);
-      tdF.style.color = fragColor(c.fragmentation);
-      tdF.style.fontWeight = "600";
-      tr.appendChild(tdF);
-      tr.appendChild(el("td", null, fmtBytesMb(c.totalIndexSize)));
-      tr.appendChild(el("td", null, String(c.indexCount)));
+      appendCollectionStorageRow(tr, c);
       body.appendChild(tr);
     }
   }
@@ -543,7 +931,7 @@
   }
 
   function buildIndexesView(report) {
-    // Per-namespace count of used / unused.
+    // Per-namespace chart only; findings + advice live in #indexesFindings (same as Overview).
     const perNs = new Map();
     for (const entry of report.normalized || []) {
       const dbs = entry?.normalized?.databases || [];
@@ -566,25 +954,25 @@
     const rows = Array.from(perNs.values())
       .sort((a, b) => (b.used + b.unused) - (a.used + a.unused))
       .slice(0, 25);
-    if (rows.length > 0) {
-      renderChart($("#chartIndexes"), {
+    const canvas = $("#chartIndexes");
+    if (rows.length > 0 && canvas) {
+      const spec = {
         kind: "stackedBar",
-        labels: rows.map((r) => r.ns),
+        labels: rows.map((r) => shortChartLabel(r.ns)),
+        maxRows: 25,
         datasets: [
           { label: "Used", data: rows.map((r) => r.used), backgroundColor: "#00ed64" },
           { label: "Unused (0 ops)", data: rows.map((r) => r.unused), backgroundColor: "#ff5050" },
         ],
-      });
+      };
+      if (typeof window.Chart === "undefined") renderChartDeferred(canvas, spec);
+      else renderChart(canvas, spec);
+    } else if (canvas) {
+      prepareChartHost(canvas);
+      canvas.style.display = "none";
     }
-    // List of unused / redundant findings already in `report.findings`.
-    const findings = (report.findings || []).filter((f) => f.id === "IndexInfoItem");
     const content = $("#indexesContent");
-    content.innerHTML = "";
-    if (findings.length === 0) {
-      content.appendChild(el("p", { class: "report-muted" }, "No index findings."));
-      return;
-    }
-    findings.forEach((f) => content.appendChild(findingItem(f)));
+    if (content) content.innerHTML = "";
   }
 
   function buildNodesView(report) {
@@ -711,6 +1099,14 @@
     return wrap;
   }
 
+  function formatFindingDescription(desc) {
+    if (!desc) return "";
+    return String(desc).replace(
+      /see the IndexInfo findings below\.?/gi,
+      "see the Indexes section.",
+    );
+  }
+
   function findingItem(f, options) {
     const opts = options || {};
     const head = el("div", { class: "report-finding-head" },
@@ -734,7 +1130,7 @@
     }
     const node = el("div", { class: `report-finding sev-${(f.severity || "info").toLowerCase()}-border` },
       head,
-      el("div", { class: "report-finding-desc" }, f.description || ""),
+      el("div", { class: "report-finding-desc" }, formatFindingDescription(f.description)),
     );
     // Per-finding action snippets only render when the caller asks for them (e.g. the
     // Cluster group, where there is typically just one oplog finding so the snippets
@@ -794,34 +1190,50 @@
     return [header.trim(), "", ...actions.map((a) => a.command + "\n")].join("\n");
   }
 
+  const ATLAS_RESYNC_TICKET_TEMPLATE =
+    "Title: Request for Cluster Resync due to High Fragmentation\n\n" +
+    "[Cluster Link](https://cloud.mongodb.com/v2/xxxxxxxx#/clusters)\n\n" +
+    "We observed high fragmentation in many namespaces, so we would like to request a Rolling Resync planned at [Date/Time (UTC) to begin operation, ideally maintenance window].\n\n" +
+    "Please confirm when the operation can be scheduled and if any additional actions are required from our side.";
+
+  function findingsLookLikeAtlas(findings) {
+    return findings.some((f) => /\.mongodb\.net(:|$)/i.test(f.host || ""));
+  }
+
+  const COMPACT_DOCS = "https://www.mongodb.com/docs/manual/reference/command/compact/";
+  const AUTOCOMPACT_DOCS = "https://www.mongodb.com/docs/manual/reference/command/autoCompact/";
+  const COMPACT_IMPACT_WARNING =
+    "[Warning] `compact` / `autoCompact` hold an exclusive lock on the collection for the node where they run and can severely impact availability and throughput on large collections. Review limitations, rolling procedure, and expected impact in the documentation before scheduling.";
+
   function collectionsAdvice(findings) {
-    const compactBulk = bulkScriptFromFindings(
-      findings,
-      "compact",
-      "// MongoAdvisor — bulk COMPACT for fragmented collections in this group.\n" +
-        "// [Warning] STAGING FIRST. compact holds an exclusive lock on each collection on\n" +
-        "// the node it runs on — run rolling: connect to a SECONDARY, run there, step the\n" +
-        "// PRIMARY down, repeat. On Atlas you cannot run compact — request a rolling resync\n" +
-        "// from MongoDB Support instead.",
-    );
+    const isAtlas = findingsLookLikeAtlas(findings);
+    const compactBullet = {
+      text:
+        "Run `compact` (MongoDB ≤ 7) or `autoCompact` (MongoDB 8.0+) during a maintenance window — rolling across secondaries first, then the PRIMARY via step-down.",
+      warning: COMPACT_IMPACT_WARNING,
+      docs: [
+        { url: COMPACT_DOCS, label: "compact command" },
+        { url: AUTOCOMPACT_DOCS, label: "autoCompact command" },
+      ],
+    };
     return {
       title: "Storage fragmentation",
       explanation:
         "Fragmentation mainly matters when you are disk-bound or need to shrink storage. WiredTiger does not return reusable space to the OS on its own, but it will reuse that space for new writes — so a high fragmentation ratio is not, by itself, a performance issue.",
-      bullets: [
-        "Run `compact` (MongoDB ≤ 7) or `autoCompact` (MongoDB 8.0+) during a maintenance window, secondaries first, PRIMARY last via step-down.",
-        "On Atlas, `compact` is not available — open a support ticket to request a rolling resync, which rebuilds each member from a fresh snapshot.",
-        "For very large collections that are upstream-sourced (CDC, ETL), it can be faster to drop and re-create from the source than to compact in place.",
-      ],
-      docs: "https://www.mongodb.com/docs/manual/reference/command/compact/",
-      scripts: compactBulk
+      bullets: isAtlas
         ? [
             {
-              label: "Copy bulk compact script",
-              text: compactBulk,
+              option: "A",
+              text:
+                "Open a support ticket with MongoDB Atlas Support to request a planned rolling resync during your maintenance window.",
+              copyScript: {
+                label: "Copy support ticket template",
+                text: ATLAS_RESYNC_TICKET_TEMPLATE,
+              },
             },
+            { option: "B", ...compactBullet },
           ]
-        : [],
+        : [{ option: "A", ...compactBullet }],
     };
   }
 
@@ -872,7 +1284,7 @@
       );
       if (oplog.platform === "atlas") {
         bullets.push(
-          "Atlas blocks the `replSetResizeOplog` shell command. Use the Additional Settings pane in the UI, the Atlas CLI, or the Admin API — Atlas rolls each shard / config replica set automatically.",
+          "Depending on whether you choose to use storage auto-scaling, Atlas manages the oplog entries based on either the minimum oplog retention window, or the oplog size.",
         );
       } else {
         bullets.push(
@@ -895,14 +1307,23 @@
     if (bullets.length === 0) {
       bullets.push("Inspect the individual cluster findings below for details.");
     }
+    const isAtlasOplog = oplog && oplog.platform === "atlas";
     return {
       title: "Replica-set health",
       bullets,
-      docs:
-        oplog && oplog.platform === "atlas"
-          ? "https://www.mongodb.com/docs/atlas/cluster-additional-settings/#set-minimum-oplog-window"
-          : "https://www.mongodb.com/docs/manual/core/replica-set-oplog/",
-      // Render the oplog finding's platform-specific snippets inline in the advice card.
+      docs: oplog
+        ? (isAtlasOplog
+          ? "https://www.mongodb.com/docs/atlas/customize-storage/#std-label-oplog-size-behavior/"
+          : "https://www.mongodb.com/docs/manual/core/replica-set-oplog/")
+        : null,
+      docsLead: oplog
+        ? (isAtlasOplog
+          ? "Configure oplog retention or size in Atlas using MongoDB's official storage guide. Settings depend on whether storage auto-scaling is enabled."
+          : "Resize the oplog or set minimum retention on each replica-set member — see the server documentation for rolling procedures.")
+        : null,
+      docsLabel: oplog
+        ? (isAtlasOplog ? "Atlas — oplog size behavior" : "Replica set oplog")
+        : null,
       inlineActions: oplog ? (oplog.actions || []) : [],
     };
   }
@@ -967,35 +1388,134 @@
     };
   }
 
+  function adviceDocsLabel(url, custom) {
+    if (custom) return custom;
+    if (!url) return "Open documentation";
+    if (/customize-storage|oplog-size-behavior/i.test(url)) return "Atlas — oplog size behavior";
+    if (/replica-set-oplog/i.test(url)) return "Replica set oplog";
+    if (/production-checklist/i.test(url)) return "Production operations checklist";
+    if (/\/compact\//i.test(url)) return "compact command";
+    if (/\/core\/indexes\//i.test(url)) return "MongoDB indexes";
+    if (/\/sharding-balancer/i.test(url)) return "Sharding balancer";
+    return "Open documentation";
+  }
+
+  function normalizeAdviceBullet(raw, index, advice) {
+    if (typeof raw === "string") {
+      const b = { text: raw };
+      if (advice.docsInFirstBullet && advice.docs && index === 0) {
+        b.docs = advice.docs;
+        b.docsLabel = advice.docsLabel;
+      }
+      return b;
+    }
+    return raw;
+  }
+
+  function adviceBulletHasExtras(b) {
+    return Boolean(b.warning || b.copyScript || b.docs || (Array.isArray(b.docs) && b.docs.length));
+  }
+
+  function appendAdviceBulletDocLinks(container, docs, docsLabel) {
+    const links = Array.isArray(docs)
+      ? docs
+      : [{ url: docs, label: docsLabel }];
+    for (const item of links) {
+      if (!item?.url) continue;
+      container.appendChild(el("a", {
+        class: "btn-secondary btn-mini report-advice-doc-link",
+        href: item.url,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        title: item.url,
+      }, `${item.label || adviceDocsLabel(item.url, docsLabel)} ↗`));
+    }
+  }
+
   function adviceCard(advice) {
     const card = el("div", { class: "report-group-advice" });
-    const head = el("div", { class: "report-group-advice-head" },
-      el("span", { class: "report-group-advice-title" }, advice.title || "Recommended actions"),
-    );
-    if (advice.docs) {
-      head.appendChild(el("a", {
-        class: "report-finding-doc",
+    const hasScripts = Array.isArray(advice.scripts) && advice.scripts.length > 0;
+    const hasInline = Array.isArray(advice.inlineActions) && advice.inlineActions.length > 0;
+    const hasBullets = Array.isArray(advice.bullets) && advice.bullets.length > 0;
+    const normalizedBullets = hasBullets
+      ? advice.bullets.map((raw, i) => normalizeAdviceBullet(raw, i, advice))
+      : [];
+    const bulletsWithInlineScripts = normalizedBullets.some((b) => b.copyScript);
+    const docsInFirstBullet = Boolean(advice.docsInFirstBullet && advice.docs);
+    const bulletExtras = normalizedBullets.some(adviceBulletHasExtras);
+    const docsPrimary = Boolean(advice.docs) && !hasScripts && !hasInline && !docsInFirstBullet && !bulletExtras;
+    const showRecommendedActions = hasScripts || hasInline || docsInFirstBullet || bulletExtras;
+
+    card.appendChild(el("div", { class: "report-group-advice-head" },
+      el("span", { class: "report-group-advice-title" }, advice.title || "Guidance"),
+    ));
+    if (advice.explanation) {
+      card.appendChild(el("p", { class: "report-group-advice-text" }, advice.explanation));
+    }
+    if (advice.docs && !docsInFirstBullet && !bulletExtras) {
+      const docsBox = el("div", {
+        class: `report-group-advice-docs${docsPrimary ? " report-group-advice-docs-primary" : ""}`,
+      });
+      docsBox.appendChild(el("div", { class: "report-group-advice-docs-kicker" },
+        docsPrimary ? "Recommended next step" : "Official documentation",
+      ));
+      const lead = advice.docsLead || (docsPrimary
+        ? "Follow MongoDB's official documentation for configuration steps and platform-specific guidance."
+        : null);
+      if (lead) {
+        docsBox.appendChild(el("p", { class: "report-group-advice-docs-lead" }, lead));
+      }
+      docsBox.appendChild(el("a", {
+        class: "report-group-advice-docs-btn",
         href: advice.docs,
         target: "_blank",
         rel: "noopener noreferrer",
         title: advice.docs,
-      }, "Docs"));
-    }
-    card.appendChild(head);
-    if (advice.explanation) {
-      card.appendChild(el("p", { class: "report-group-advice-text" }, advice.explanation));
+      }, `${adviceDocsLabel(advice.docs, advice.docsLabel)} ↗`));
+      card.appendChild(docsBox);
     }
     if (advice.warning) {
       card.appendChild(el("p", { class: "report-group-advice-warning" }, advice.warning));
     }
-    if (Array.isArray(advice.bullets) && advice.bullets.length > 0) {
-      card.appendChild(el("div", { class: "report-group-advice-subtitle" }, "Recommended actions"));
+    if (hasBullets) {
+      card.appendChild(el("div", { class: "report-group-advice-subtitle" },
+        showRecommendedActions ? "Recommended actions" : "What to know",
+      ));
       const ul = el("ul", { class: "report-group-advice-bullets" });
-      advice.bullets.forEach((b) => ul.appendChild(el("li", null, b)));
+      normalizedBullets.forEach((b, i) => {
+        const li = el("li");
+        if (b.option) {
+          li.appendChild(el("span", { class: "report-advice-option-label" }, `Option ${b.option}`));
+          li.appendChild(document.createTextNode(" — "));
+        }
+        li.appendChild(document.createTextNode(b.text));
+        if (b.warning) {
+          li.appendChild(el("div", { class: "report-advice-bullet-warning" }, b.warning));
+        }
+        const actionRow = el("div", { class: "report-advice-bullet-actions" });
+        let hasActionRow = false;
+        if (b.copyScript) {
+          hasActionRow = true;
+          actionRow.appendChild(el("button", {
+            type: "button",
+            class: "btn-secondary btn-mini",
+            onclick: (ev) => copyToClipboard(b.copyScript.text, ev.currentTarget),
+          }, b.copyScript.label));
+        }
+        if (docsInFirstBullet && i === 0 && advice.docs) {
+          hasActionRow = true;
+          appendAdviceBulletDocLinks(actionRow, advice.docs, advice.docsLabel);
+        } else if (b.docs) {
+          hasActionRow = true;
+          appendAdviceBulletDocLinks(actionRow, b.docs, b.docsLabel);
+        }
+        if (hasActionRow) li.appendChild(actionRow);
+        ul.appendChild(li);
+      });
       card.appendChild(ul);
     }
     // Bulk-script "Copy" buttons (text-only payload, no inline pre).
-    if (Array.isArray(advice.scripts) && advice.scripts.length > 0) {
+    if (hasScripts && !bulletsWithInlineScripts) {
       const tools = el("div", { class: "report-group-advice-tools" });
       advice.scripts.forEach((s) => {
         tools.appendChild(el("button", {
@@ -1016,26 +1536,23 @@
     return card;
   }
 
-  function buildFindingsList(report) {
-    const wrap = $("#findingsList");
-    wrap.innerHTML = "";
+  function appendFindingsGroups(wrap, report, { filterItems = null, emptyMessage } = {}) {
     const findings = (report.findings || []).slice();
-    if (findings.length === 0) {
-      wrap.appendChild(el("p", { class: "report-muted" }, "No findings — every check passed."));
-      return;
+    const filtered = filterItems
+      ? findings.filter((f) => filterItems.includes(f.item || f.id || "Other"))
+      : findings;
+    if (filtered.length === 0) {
+      if (emptyMessage) wrap.appendChild(el("p", { class: "report-muted" }, emptyMessage));
+      return false;
     }
 
-    // Group by check item label, preserving original `id` as a fallback. The summary card
-    // already showed the global totals, so here we want one section per check category.
     const groups = new Map();
-    for (const f of findings) {
+    for (const f of filtered) {
       const key = f.item || f.id || "Other";
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(f);
     }
 
-    // Sort: groups by their max severity (HIGH first), then by group name; findings
-    // inside each group by severity then host.
     const sortedGroups = Array.from(groups.entries()).sort((a, b) => {
       const sa = Math.min(...a[1].map((f) => sevRank(f.severity)));
       const sb = Math.min(...b[1].map((f) => sevRank(f.severity)));
@@ -1050,12 +1567,58 @@
       const advice = adviceForGroup(item, list);
       if (advice) section.appendChild(adviceCard(advice));
       const body = el("div", { class: "report-findings-group-body" });
-      // The Cluster group typically has 1-2 actionable findings (oplog), and its advice
-      // card already inlines those snippets, so don't render per-finding actions again.
-      list.forEach((f) => body.appendChild(findingItem(f, { showActions: false })));
+      if (item === "Collections") {
+        const flaggedNs = new Set(
+          list
+            .filter((f) => /fragmentation/i.test(f.title || ""))
+            .map((f) => f.namespace)
+            .filter(Boolean),
+        );
+        const colls = aggregateCollections(report);
+        if (colls.length > 0) {
+          body.appendChild(mountCollectionsStorageTable(colls, {
+            flaggedNs,
+            paginated: true,
+            caption: "Per collection · collStats — same table as live Storage & Fragmentation. Highlighted rows match fragmentation findings.",
+          }));
+        }
+        list
+          .filter((f) => !/fragmentation/i.test(f.title || ""))
+          .forEach((f) => body.appendChild(findingItem(f, { showActions: false })));
+      } else {
+        list.forEach((f) => body.appendChild(findingItem(f, { showActions: false })));
+      }
       section.appendChild(body);
       wrap.appendChild(section);
     }
+    return true;
+  }
+
+  function buildFindingsList(report) {
+    const wrap = $("#findingsList");
+    wrap.innerHTML = "";
+    const findings = (report.findings || []).slice();
+    if (findings.length === 0) {
+      wrap.appendChild(el("p", { class: "report-muted" }, "No findings — every check passed."));
+      return;
+    }
+    appendFindingsGroups(wrap, report);
+  }
+
+  function mountTabFindings(containerSel, report, groupNames) {
+    const wrap = $(containerSel);
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    const has = (report.findings || []).some((f) => groupNames.includes(f.item || f.id || "Other"));
+    if (!has) {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+    wrap.appendChild(el("h2", { class: "report-section-h2" }, "Findings & recommendations"));
+    const inner = el("div", { class: "report-findings-list" });
+    appendFindingsGroups(inner, report, { filterItems: groupNames });
+    wrap.appendChild(inner);
   }
 
   function buildSummaryCard(report) {
@@ -1084,42 +1647,101 @@
     pre.textContent = JSON.stringify(report.normalized, null, 2);
   }
 
+  function ensureTabBuilt(tab) {
+    if (!activeReport || builtTabs.has(tab)) return;
+    const report = activeReport;
+    switch (tab) {
+      case "nodes":
+        mountTabFindings("#nodesFindings", report, TAB_FINDING_GROUPS.nodes);
+        buildNodesView(report);
+        break;
+      case "databases":
+        buildDatabasesView(report);
+        break;
+      case "collections":
+        mountTabFindings("#collectionsFindings", report, TAB_FINDING_GROUPS.collections);
+        buildCollectionCacheChart(report);
+        buildCollectionsView(report);
+        break;
+      case "indexes":
+        buildIndexesView(report);
+        mountTabFindings("#indexesFindings", report, TAB_FINDING_GROUPS.indexes);
+        break;
+      case "params":
+        buildParametersView(report);
+        break;
+      case "raw":
+        buildRawView(report);
+        break;
+      default:
+        break;
+    }
+    builtTabs.add(tab);
+  }
+
+  function activateTab(tab) {
+    const tabs = $all("#reportTabs button");
+    tabs.forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    $all("[data-tab-pane]").forEach((pane) => {
+      pane.hidden = pane.dataset.tabPane !== tab;
+    });
+    ensureTabBuilt(tab);
+  }
+
   function setupTabs() {
     const tabs = $all("#reportTabs button");
     tabs.forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const tab = btn.dataset.tab;
-        tabs.forEach((b) => b.classList.toggle("active", b === btn));
-        $all('[data-tab-pane]').forEach((pane) => {
-          pane.hidden = pane.dataset.tabPane !== tab;
-        });
-      });
+      btn.addEventListener("click", () => activateTab(btn.dataset.tab));
     });
+    const active = tabs.find((b) => b.classList.contains("active"));
+    activateTab(active?.dataset.tab || "overview");
   }
 
-  function renderReport(report) {
+  /** Overview only on first paint; other tabs build on first visit (faster offline open). */
+  function renderReportOverview(report) {
     hide($("#reportLoading"));
     show($("#reportSingleView"));
+    destroyReportCharts();
+    activeReport = report;
+    builtTabs.clear();
+    builtTabs.add("overview");
     buildSummaryCard(report);
     buildFindingsList(report);
     buildSeverityChart(report);
     buildStorageChart(report);
-    buildNodesView(report);
-    buildDatabasesView(report);
-    buildCollectionsView(report);
-    buildIndexesView(report);
-    buildParametersView(report);
-    buildRawView(report);
     setupTabs();
   }
 
+  function renderReport(report) {
+    renderReportOverview(report);
+  }
+
   // ─── boot ───
+  let embeddedReportCache;
+
   function readEmbedded() {
+    if (embeddedReportCache !== undefined) return embeddedReportCache;
     const node = document.getElementById("reportData");
-    if (!node) return null;
+    if (!node) {
+      embeddedReportCache = null;
+      return null;
+    }
     const txt = node.textContent.trim();
-    if (!txt) return null;
-    try { return JSON.parse(txt); } catch (e) { return null; }
+    if (!txt) {
+      embeddedReportCache = null;
+      return null;
+    }
+    try {
+      embeddedReportCache = JSON.parse(txt);
+      return embeddedReportCache;
+    } catch (_) {
+      embeddedReportCache = null;
+      return null;
+    }
+  }
+
+  function isEmbeddedReport() {
+    return readEmbedded() != null;
   }
 
   function refreshHealthBadge() {
@@ -1145,15 +1767,20 @@
   async function boot() {
     const embedded = readEmbedded();
     if (embedded) {
-      // Self-contained download mode. The html-builder may strip the status badge
-      // entirely (no /api/health to talk to), so guard against it being missing.
+      // Self-contained download: no Chart.js CDN, no /api/*, no list view — render overview
+      // immediately and build other tabs on first click (avoids stringify-all-collections upfront).
+      document.documentElement.classList.add("report-embedded");
       const badge = document.getElementById("mongoStatus");
       if (badge) {
         badge.textContent = "offline";
         badge.className = "badge";
       }
       hide($("#reportListView"));
-      renderReport(embedded);
+      hide($("#reportLoading"));
+      show($("#reportSingleView"));
+      const paint = () => renderReportOverview(embedded);
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(paint);
+      else paint();
       return;
     }
     refreshHealthBadge();

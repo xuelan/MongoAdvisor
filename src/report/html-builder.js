@@ -19,6 +19,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { enrichNormalizedCache } = require("./enrich-cache");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "..", "public");
 const DEV = process.env.NODE_ENV !== "production";
@@ -66,6 +67,9 @@ function inlineJs(html, js) {
 
 /** Trim view-switch noise that doesn't make sense offline. */
 function trimForOffline(html) {
+  html = html.replace(/<html(\s[^>]*)?>/i, (m) =>
+    m.includes("report-embedded") ? m : m.replace("<html", '<html class="report-embedded"'),
+  );
   // Hide the list view entirely (no /api to talk to).
   html = html.replace(
     /<div id="reportListView" hidden>[\s\S]*?<\/div>\s*<!-- SINGLE REPORT view/,
@@ -110,6 +114,20 @@ function trimForOffline(html) {
  * Without this, a 161-collection capture produces a ~3 MB HTML file (every collStats
  * carries hundreds of `wiredTiger.*` counters). With this, it's ~10× smaller.
  */
+/** Keep only fields the Indexes tab chart and IndexInfo checks need. */
+function slimIndexStats(batch) {
+  if (!Array.isArray(batch) || batch.length === 0) return undefined;
+  return batch.map((entry) => ({
+    name: entry?.name,
+    key: entry?.key,
+    stats: (entry?.stats || []).map((h) => ({
+      host: h?.host,
+      accesses: h?.accesses,
+      since: h?.since,
+    })),
+  }));
+}
+
 function slimNormalized(reportDoc) {
   const out = JSON.parse(JSON.stringify(reportDoc));
   for (const entry of out.normalized || []) {
@@ -150,6 +168,14 @@ function slimNormalized(reportDoc) {
         if (!coll.stats) continue;
         const s = coll.stats;
         const wtFree = s.wiredTiger?.["block-manager"]?.["file bytes available for reuse"];
+        const wtCache = s.wiredTiger?.cache?.["bytes currently in the cache"];
+        const wt = {};
+        if (wtFree != null) {
+          wt["block-manager"] = { "file bytes available for reuse": wtFree };
+        }
+        if (wtCache != null) {
+          wt.cache = { "bytes currently in the cache": wtCache };
+        }
         coll.stats = {
           ns: s.ns,
           count: s.count,
@@ -161,10 +187,17 @@ function slimNormalized(reportDoc) {
           capped: s.capped,
           scaleFactor: s.scaleFactor,
           indexSizes: s.indexSizes,
-          wiredTiger: wtFree != null
-            ? { "block-manager": { "file bytes available for reuse": wtFree } }
-            : null,
+          wiredTiger: Object.keys(wt).length > 0 ? wt : null,
         };
+        const slimStats = slimIndexStats(coll.indexStats);
+        if (slimStats) coll.indexStats = slimStats;
+        else delete coll.indexStats;
+        if (Array.isArray(coll.indexes) && coll.indexes.length > 0) {
+          coll.indexes = coll.indexes.map((idx) => ({
+            name: idx?.name,
+            key: idx?.key,
+          }));
+        }
       }
     }
   }
@@ -192,15 +225,23 @@ function embedJson(html, reportDoc) {
   );
 }
 
-function buildSelfContained(reportDoc) {
+/**
+ * @param {object} reportDoc
+ * @param {{ rawEjsonTexts?: string[] }} [options] — when set, backfill missing
+ *   per-collection cache bytes from getMongoData raw uploads before slimming.
+ */
+function buildSelfContained(reportDoc, options = {}) {
+  const rawTexts = options.rawEjsonTexts || [];
+  const doc =
+    rawTexts.length > 0 ? enrichNormalizedCache(reportDoc, rawTexts) : reportDoc;
   const { template, css, js } = getAssets();
   let html = template;
   html = inlineCss(html, css);
   html = stripChartCdn(html);
   html = inlineJs(html, js);
   html = trimForOffline(html);
-  html = embedJson(html, reportDoc);
+  html = embedJson(html, doc);
   return html;
 }
 
-module.exports = { buildSelfContained };
+module.exports = { buildSelfContained, slimNormalized, enrichNormalizedCache };

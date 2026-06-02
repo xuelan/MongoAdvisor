@@ -208,7 +208,13 @@ router.get("/:id/download.html", async (req, res, next) => {
     const oid = new ObjectId(req.params.id);
     const doc = await getDb().collection(COLLECTION).findOne({ _id: oid });
     if (!doc) return res.status(404).send("Report not found");
-    const html = buildSelfContained(doc);
+    const rawDocs = await getDb()
+      .collection(RAW_COLLECTION)
+      .find({ reportId: oid }, { projection: { rawEjson: 1 } })
+      .toArray();
+    const html = buildSelfContained(doc, {
+      rawEjsonTexts: rawDocs.map((r) => r.rawEjson),
+    });
     const safeName = (doc.name || "report")
       .replace(/[^a-z0-9_\-]+/gi, "_")
       .slice(0, 60);

@@ -7,11 +7,7 @@
  */
 
 const ATLAS_DOCS_OPLOG_WINDOW =
-  "https://www.mongodb.com/docs/atlas/cluster-additional-settings/#set-minimum-oplog-window";
-const ATLAS_CLI_DOCS =
-  "https://www.mongodb.com/docs/atlas/cli/current/command/atlas-clusters-advancedSettings-update/";
-const ATLAS_API_DOCS =
-  "https://www.mongodb.com/docs/atlas/reference/api-resources-spec/v2/#tag/Clusters/operation/updateClusterAdvancedConfiguration";
+  "https://www.mongodb.com/docs/atlas/customize-storage/#std-label-oplog-size-behavior/";
 const SERVER_OPLOG_DOCS =
   "https://www.mongodb.com/docs/manual/core/replica-set-oplog/";
 
@@ -23,51 +19,7 @@ function looksLikeAtlas(group) {
 
 function buildOplogActions({ isAtlas, need, suggestedMb }) {
   if (isAtlas) {
-    // Atlas blocks `replSetResizeOplog` — the supported path is the Additional Settings
-    // pane (Atlas UI), the Atlas CLI's `advancedSettings update`, or the Admin API's
-    // PATCH .../clusters/{cluster}/processArgs endpoint. See docs link above.
-    return [
-      {
-        kind: "atlasUi",
-        label: "Atlas UI — Set Minimum Oplog Window",
-        warning:
-          "Atlas blocks `replSetResizeOplog`. Use the Additional Settings pane on the cluster — changes are applied via rolling restart.",
-        link: ATLAS_DOCS_OPLOG_WINDOW,
-        linkLabel: "Atlas docs",
-        command:
-          "// Atlas UI path:\n" +
-          "// Project → Database → <your cluster> → … (Actions menu) → Edit Configuration\n" +
-          "//   → Additional Settings → More Configuration Options\n" +
-          `//   → Set Minimum Oplog Window  = ${need}  (hours)\n` +
-          "// Atlas performs a rolling restart of each shard / config replica set.",
-      },
-      {
-        kind: "atlasCli",
-        label: `Atlas CLI — set minimum oplog window to ${need} h`,
-        warning:
-          "Requires the Atlas CLI (`brew install mongodb-atlas-cli`) and a logged-in profile (`atlas auth login`). Replace <your-cluster-name> with the project-level cluster label (NOT the replica-set name).",
-        link: ATLAS_CLI_DOCS,
-        linkLabel: "atlas clusters advancedSettings update",
-        command:
-          `atlas clusters advancedSettings update <your-cluster-name> \\\n` +
-          `  --oplogMinRetentionHours ${need}`,
-      },
-      {
-        kind: "atlasApi",
-        label: `Atlas Admin API — patch processArgs`,
-        warning:
-          "Replace {GROUP_ID} (project ID) and {CLUSTER_NAME}. Use either a service-account bearer token or `--digest -u <publicKey>:<privateKey>` for the legacy Programmatic API Key flow.",
-        link: ATLAS_API_DOCS,
-        linkLabel: "API reference",
-        command:
-          "# v2 Atlas Admin API — set oplogMinRetentionHours on the cluster\n" +
-          `curl -X PATCH "https://cloud.mongodb.com/api/atlas/v2/groups/{GROUP_ID}/clusters/{CLUSTER_NAME}/processArgs" \\\n` +
-          "  -H 'Content-Type: application/json' \\\n" +
-          "  -H 'Accept: application/vnd.atlas.2024-08-05+json' \\\n" +
-          "  -H 'Authorization: Bearer <token>' \\\n" +
-          `  -d '{ "oplogMinRetentionHours": ${need} }'`,
-      },
-    ];
+    return [];
   }
   return [
     {
@@ -157,7 +109,7 @@ function run(report, thresholds) {
             `db.getReplicationInfo() reports a ${info.timeDiffHours.toFixed(1)} h window. ` +
             `Recommended minimum is ${need} h to survive maintenance / resync windows. ` +
             (isAtlas
-              ? "Detected as Atlas — change `oplogMinRetentionHours` via the Additional Settings pane in the UI, the Atlas CLI, or the Admin API."
+              ? "Detected as Atlas. Depending on whether you choose to use storage auto-scaling, Atlas manages oplog entries based on either the minimum oplog retention window, or the oplog size."
               : "Raise `replication.oplogSizeMB` and/or set `oplogMinRetentionHours` on each member."),
           docs: isAtlas ? ATLAS_DOCS_OPLOG_WINDOW : SERVER_OPLOG_DOCS,
           actions: buildOplogActions({ isAtlas, need, suggestedMb }),

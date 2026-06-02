@@ -89,7 +89,7 @@ function run(report, thresholds) {
               namespace: ns,
               severity: "LOW",
               title: `Index footprint ${Math.round(idxRatio * 100)}% on ${ns}`,
-              description: `\`totalIndexSize\` / \`storageSize\` = ${idxRatio.toFixed(2)} (threshold ${t.index_size_ratio}). Drop unused / redundant indexes — see the IndexInfo findings below.`,
+              description: `\`totalIndexSize\` / \`storageSize\` = ${idxRatio.toFixed(2)} (threshold ${t.index_size_ratio}). Drop unused / redundant indexes — see the Indexes section.`,
             });
           }
         }
