@@ -1,8 +1,17 @@
-# Cluster Reports (offline analysis)
+# Cluster Reports (offline auditing)
 
-In addition to the live dashboard, MongoAdvisor can analyze a snapshot
-collected with [`getMongoData.js`](https://github.com/mongodb/support-tools/tree/master/getMongoData)
-and produce a human-readable report. Use this when:
+MongoAdvisor has two modes (see the [README — Two modes](../README.md#two-modes)):
+
+| Mode | UI | This doc |
+| --- | --- | --- |
+| **Live monitoring** | Dashboard (`index.html`) | [Dashboard reference](dashboard.md) |
+| **Offline auditing** | Reports (`report.html`) | **You are here** |
+
+**Offline auditing** analyzes a snapshot collected with
+[`getMongoData.js`](https://github.com/mongodb/support-tools/tree/master/getMongoData)
+and produces a human-readable report. No cluster URI is registered for the
+snapshot; MongoAdvisor never opens a live connection to the cluster under
+review. Use this when:
 
 - You don't have MongoDB network connectivity from the MongoAdvisor host
   (firewall, air-gapped, support engagement, customer-shared dump).
@@ -11,6 +20,10 @@ and produce a human-readable report. Use this when:
 
 Eight production-readiness checks run per node and are aggregated by
 replica-set name. See [What's checked](#whats-checked) below.
+
+The same Node process serves both modes; only the **Reports** flow writes to
+`reports` and `reports_raw`. Live pollers and the dashboard use separate
+collections (`query_stats`, `slow_queries`, etc.).
 
 ## Workflow
 

@@ -11,7 +11,7 @@
 > planned, not shipped yet).
 
 MongoAdvisor rethinks MongoDB observability. Instead of yet another raw-metrics
-dashboard or auditing tool, it continuously analyzes your clusters and delivers
+dashboard or auditing tool, it analyzes your clusters and delivers
 **actionable recommendations** with direct links to the exact playbook —
 turning insight into action in seconds, not hours. So you can keep innovating
 and scaling.
@@ -22,8 +22,36 @@ and scaling.
 > [Atlas Metrics](https://www.mongodb.com/docs/atlas/monitoring-alerts/) or
 > [Atlas Performance Advisor](https://www.mongodb.com/docs/atlas/performance-advisor/) —
 > it sits **on top of them** and is built for **complex, multi-tenant
-> environments** where one Atlas project view is no longer enough. It adds:
+> environments** where one Atlas project view is no longer enough.
 
+## Two modes
+
+MongoAdvisor supports two complementary workflows. You can use either or both;
+they share the same Node process and app database but differ in **input** and
+**when** you use them.
+
+| | **Live monitoring** | **Offline auditing (reports)** |
+| --- | --- | --- |
+| **Purpose** | Ongoing observability for clusters you can reach over the network | One-shot production-readiness review from a file snapshot |
+| **Input** | Register cluster URIs (+ optional Atlas API keys) in the UI | Upload [`getMongoData.js`](https://github.com/mongodb/support-tools/tree/master/getMongoData) JSON captures |
+| **UI** | Dashboard — <http://localhost:3000> (`index.html`) | **Reports** — <http://localhost:3000/report.html> |
+| **Data path** | Embedded pollers every 5–10 min → time-series in the app DB | Parse upload → `reports` / `reports_raw`; optional **Download HTML** |
+| **Best for** | Dev/staging/prod you control; multi-cluster, multi-tenant views | Support engagements, air-gapped sites, customer-shared dumps, no live wire access |
+| **Deep dive** | [docs/dashboard.md](docs/dashboard.md), [docs/collector.md](docs/collector.md) | [docs/reports.md](docs/reports.md) |
+
+**Live monitoring** requires read-only connectivity from the MongoAdvisor host
+to each source cluster (and optionally HTTPS to Atlas for slow-query logs).
+**Offline auditing** only needs the MongoAdvisor app DB and browser — cluster
+access happens earlier, on the machine where you run `getMongoData.js`.
+
+---
+
+## Live monitoring
+
+Register one or more clusters under **Monitored Clusters**, then open the
+dashboard for charts, explain plans, index recommendations, and collector
+audit rows. Telemetry is written continuously to the MongoAdvisor application
+database.
 
 **What it collects (per registered cluster):**
 
@@ -88,18 +116,81 @@ and **Generate drop-index scripts**. Workflow details:
 [explain-img]: docs/images/explain-stage-breakdown.jpg
 [indexes-img]: docs/images/unused-and-redundant-indexes.jpg
 
-## Offline reports from `getMongoData.js`
+## Offline auditing (reports)
 
-When network access to the cluster isn't an option (support engagement,
-air-gapped, customer-shared dump), you can drop one or more
+Use this mode when **live monitoring is not possible or not desired** for a
+given engagement — no cluster URI is registered for the snapshot under review.
+
+Drop one or more
 [`getMongoData.js`](https://github.com/mongodb/support-tools/tree/master/getMongoData)
-captures into MongoAdvisor and get a self-contained report. Eight
+captures into MongoAdvisor and get a self-contained audit report. Eight
 production-readiness checks (build, security, host, serverStatus,
 cluster, coll, index, shardKey) run per node and are aggregated by
 replica-set name. Open **Reports** in the header (or
-`http://localhost:3000/report.html`), drop the JSON file(s), and click
-**Download HTML** to share a single offline artifact. Full reference:
-[docs/reports.md](docs/reports.md).
+`http://localhost:3000/report.html`), upload the JSON file(s), and use
+**Download HTML** to share a single artifact that opens without a server.
+Full workflow, thresholds, and limits: [docs/reports.md](docs/reports.md).
+
+### Production-readiness at a glance
+
+The **Overview** tab rolls up topology, finding counts by severity, storage
+by database, and grouped remediation cards (cluster health, security, host,
+and more).
+
+[![Offline audit report — overview with findings by severity and storage by database][report-overview-img]][report-overview-img]
+
+> If the image above doesn't render, open it directly:
+> [docs/images/report-audit-overview.png](docs/images/report-audit-overview.png).
+
+### Storage, cache & fragmentation
+
+The **Collections** tab charts WiredTiger cache share per namespace and
+storage size with fragmentation coloring — spot hot collections and reclaim
+candidates without live `collStats` polling.
+
+[![Offline audit report — collections tab with WiredTiger cache and storage charts][report-collections-img]][report-collections-img]
+
+> If the image above doesn't render, open it directly:
+> [docs/images/report-audit-collections.png](docs/images/report-audit-collections.png).
+
+Scroll to **Findings & recommendations** for per-collection `collStats` with
+reusable bytes and fragmentation %, plus playbook actions — Atlas rolling
+resync, [`compact`](https://www.mongodb.com/docs/manual/reference/command/compact/),
+or [`autoCompact`](https://www.mongodb.com/docs/manual/reference/command/autoCompact/)
+(MongoDB 8.0+).
+
+[![Offline audit report — storage fragmentation findings with per-collection collStats][report-collections-frag-img]][report-collections-frag-img]
+
+> If the image above doesn't render, open it directly:
+> [docs/images/report-audit-collections-fragmentation.png](docs/images/report-audit-collections-fragmentation.png).
+
+### Index hygiene — used vs unused
+
+The **Indexes** tab stacks used vs. unused indexes per namespace so you can
+see where write amplification and disk are going before you touch production.
+
+[![Offline audit report — indexes grouped by namespace, used vs unused][report-index-img]][report-index-img]
+
+> If the image above doesn't render, open it directly:
+> [docs/images/report-audit-index.png](docs/images/report-audit-index.png).
+
+### Actionable fix scripts
+
+Each finding group ships playbook context and copy-paste mongosh scripts —
+**hide** redundant or unused indexes first, **drop** after an observation
+window. Bulk **Copy hide-all / drop-all script** buttons cover every
+candidate in one shot.
+
+[![Offline audit report — index findings with hide and drop script recommendations][report-index-details-img]][report-index-details-img]
+
+> If the image above doesn't render, open it directly:
+> [docs/images/report-audit-index-details.png](docs/images/report-audit-index-details.png).
+
+[report-overview-img]: docs/images/report-audit-overview.png
+[report-collections-img]: docs/images/report-audit-collections.png
+[report-collections-frag-img]: docs/images/report-audit-collections-fragmentation.png
+[report-index-img]: docs/images/report-audit-index.png
+[report-index-details-img]: docs/images/report-audit-index-details.png
 
 ## Documentation map
 
@@ -108,13 +199,13 @@ This README is a **5-minute onboarding** doc. The deep dives live under
 
 | Topic                                                 | Doc                                              |
 | ----------------------------------------------------- | ------------------------------------------------ |
+| **Live monitoring** — dashboard, charts, filters      | [docs/dashboard.md](docs/dashboard.md)           |
+| **Offline auditing** — `getMongoData.js` reports      | [docs/reports.md](docs/reports.md)               |
 | Atlas bootstrap, users & roles, env vars, encryption  | [docs/setup.md](docs/setup.md)                   |
 | Collector internals, dedupe, slow-query watermark     | [docs/collector.md](docs/collector.md)           |
 | Retention, hourly rollups, sizing, runbook            | [docs/retention.md](docs/retention.md)           |
 | Workload scripts + Atlas sample-data prerequisite     | [docs/workloads.md](docs/workloads.md)           |
 | HTTP API endpoints & query parameters                 | [docs/api.md](docs/api.md)                       |
-| Dashboard charts, filters, empty-state badges         | [docs/dashboard.md](docs/dashboard.md)           |
-| Cluster Reports (offline `getMongoData.js` analysis)  | [docs/reports.md](docs/reports.md)               |
 | Project layout, unit tests, roadmap                   | [docs/development.md](docs/development.md)       |
 
 ## Supported targets and requirements
@@ -204,10 +295,12 @@ npm run indexes:ensure
 npm start
 ```
 
-Dashboard: <http://localhost:3000> (or your `PORT`). The header shows a
-status badge driven by `/api/health`. Register your first cluster under
-**Monitored Clusters** — full field reference is in
-[docs/setup.md — Register the monitored cluster](docs/setup.md#6-register-the-monitored-cluster-in-the-ui).
+- **Live monitoring:** <http://localhost:3000> — status badge from
+  `/api/health`; register clusters under **Monitored Clusters** ([setup
+  guide](docs/setup.md#6-register-the-monitored-cluster-in-the-ui)).
+- **Offline reports:** <http://localhost:3000/report.html> — **Reports**
+  in the header; no cluster registration required ([reports
+  guide](docs/reports.md#workflow)).
 
 ### Required environment variables
 

@@ -1,5 +1,10 @@
 # Workload generation
 
+> **Scope:** Workloads apply to **live monitoring** only — they drive traffic
+> on clusters you can reach so the dashboard and collector have data to show.
+> For offline audits, use [Cluster Reports](reports.md) with
+> `getMongoData.js` captures instead.
+
 The `scripts/workload*.js` helpers replay realistic read / aggregate
 patterns against MongoDB so you have something meaningful to observe in the
 MongoAdvisor dashboard while developing or demoing. They are also used to

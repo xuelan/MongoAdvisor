@@ -1,4 +1,13 @@
-# Dashboard reference
+# Dashboard reference (live monitoring)
+
+This page documents the **live monitoring** mode: the main dashboard at
+`http://localhost:3000` (`public/index.html`). After you register cluster
+URIs, embedded pollers continuously ingest metrics into the MongoAdvisor app
+DB; the UI reads that time-series data via the REST API.
+
+For **offline auditing** — upload `getMongoData.js` snapshots and generate
+shareable HTML without network access to the cluster — see
+[Cluster Reports (offline analysis)](reports.md).
 
 The frontend in [`public/`](../public) uses
 [Chart.js](https://www.chartjs.org/) and talks to the same Express process

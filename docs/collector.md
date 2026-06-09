@@ -1,7 +1,9 @@
-# Collector reference
+# Collector reference (live monitoring)
 
-How MongoAdvisor gathers data from each monitored cluster, what it writes, how
-the dedupe + timestamp logic works, and which indexes back each access pattern.
+How MongoAdvisor gathers data from each **registered** monitored cluster, what
+it writes, how the dedupe + timestamp logic works, and which indexes back each
+access pattern. This path does not apply to offline reports — those ingest
+uploaded `getMongoData.js` files instead ([reports.md](reports.md)).
 
 For retention / rollup of the collections written here, see
 [retention.md](retention.md).
