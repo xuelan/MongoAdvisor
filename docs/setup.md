@@ -1,12 +1,16 @@
 # Setup reference
 
-Full Atlas bootstrap, database users, environment variables, and credential
-encryption. The [README](../README.md#quick-start) has a 5-minute Quick Start
-for users who already have credentials provisioned; this document covers the
-**from-scratch** path on Atlas plus the reference tables for each role and
-HTTP endpoint.
+Full bootstrap for the MongoAdvisor **application database** (Atlas, local
+Docker, or self-managed), database users, environment variables, and credential
+encryption. The [README](../README.md#quick-start) has a 5-minute Quick Start;
+this document covers each app-DB option plus the **from-scratch Atlas** path and
+reference tables for each role and HTTP endpoint.
 
 - [Prerequisites](#prerequisites)
+- [Atlas bootstrap prerequisites](#atlas-bootstrap-prerequisites)
+- [Application database options](#application-database-options)
+- [Local application database (Docker)](#local-application-database-docker)
+- [Self-managed application database](#self-managed-application-database)
 - [Bootstrap (Atlas) — six steps](#bootstrap-atlas)
 - [Environment variables](#environment-variables)
 - [MongoDB users and roles (reference)](#mongodb-users-and-roles-reference)
@@ -17,6 +21,136 @@ HTTP endpoint.
 ## Prerequisites
 
 - Node.js 18+ and `npm install` in this repo.
+- A MongoDB **application database** reachable as `MONGO_URI` (see
+  [Application database options](#application-database-options) below).
+
+## Application database options
+
+MongoAdvisor persists clusters, metrics, reports, and encrypted secrets in a
+**dedicated MongoDB database** (`MONGO_DB`, default `mongoadvisor`). This is
+**not** the same as clusters you register for live monitoring or audit with
+`getMongoData.js`.
+
+| Option | Typical use | Setup |
+| --- | --- | --- |
+| **Atlas** | Production live monitoring | [Bootstrap (Atlas)](#bootstrap-atlas) |
+| **Local Atlas (Docker)** | Offline reports, local dev, no Atlas spend on app DB | [Local application database (Docker)](#local-application-database-docker) |
+| **Self-managed** | Existing on-prem / CE replica set | [Self-managed application database](#self-managed-application-database) |
+
+**Offline reports** only need the app DB + Node process — no Atlas account, no
+registered monitored cluster. **Live monitoring** additionally needs read-only
+wire access to each source cluster (Atlas or self-managed).
+
+## Local application database (Docker)
+
+MongoDB publishes a local development image that runs a single-node replica set
+without a cloud Atlas project. This is a good fit when you want **offline
+auditing** or to try MongoAdvisor without provisioning an Atlas cluster for
+the app DB.
+
+Official guide:
+[Create a Local Atlas Deployment with Docker](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-docker/).
+
+**Prerequisites:** [Docker](https://docs.docker.com/get-started/) installed and
+running.
+
+### Quick start (no auth)
+
+```bash
+docker pull mongodb/mongodb-atlas-local:latest
+docker run --name mongoadvisor-local-db -p 27017:27017 \
+  -v mongoadvisor-local-data:/data/db \
+  -v mongoadvisor-local-config:/data/configdb \
+  -d mongodb/mongodb-atlas-local:latest
+```
+
+In `.env`:
+
+```env
+MONGO_URI=mongodb://127.0.0.1:27017/mongoadvisor?directConnection=true
+MONGO_DB=mongoadvisor
+ENCRYPTION_KEY=<64 hex chars>
+```
+
+Then:
+
+```bash
+npm install
+npm run indexes:ensure
+npm start
+```
+
+Open <http://localhost:3000/report.html>, upload `getMongoData.js` captures,
+and use **Download HTML** for a shareable artifact. You do not need to register
+a cluster under **Monitored Clusters**.
+
+Stop the database when finished:
+
+```bash
+docker stop mongoadvisor-local-db
+```
+
+Data persists in the named Docker volumes until you remove them
+(`docker volume rm mongoadvisor-local-data mongoadvisor-local-config`).
+
+### Optional: auth enabled
+
+Match the [with-authentication example](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-docker/)
+from the same doc:
+
+```bash
+docker run --name mongoadvisor-local-db \
+  -e MONGODB_INITDB_ROOT_USERNAME=user \
+  -e MONGODB_INITDB_ROOT_PASSWORD=pass \
+  -p 27017:27017 \
+  -v mongoadvisor-local-data:/data/db \
+  -d mongodb/mongodb-atlas-local:latest
+```
+
+```env
+MONGO_URI=mongodb://user:pass@127.0.0.1:27017/mongoadvisor?directConnection=true
+```
+
+### Notes
+
+- Bind to `127.0.0.1` only — MongoAdvisor v0.1 beta has **no HTTP auth**; treat
+  an unauthenticated local `mongod` like any other local dev database.
+- This image is for **local development and offline tooling**, not a substitute
+  for sizing and HA on a production live-monitoring deployment — use a real
+  [Atlas app cluster](#bootstrap-atlas) or self-managed replica set for that.
+- Collectors still start with zero registered clusters; they remain idle until
+  you add URIs in the UI.
+
+## Self-managed application database
+
+If you already run MongoDB Community Edition or Enterprise (single `mongod` or
+replica set), create an application user and point `MONGO_URI` at it:
+
+```javascript
+// mongosh — adjust host/auth as needed
+use mongoadvisor
+db.createUser({
+  user: "mongoadvisor_app",
+  pwd: "<password>",
+  roles: [{ role: "readWrite", db: "mongoadvisor" }],
+})
+```
+
+```env
+MONGO_URI=mongodb://mongoadvisor_app:<password>@<host>:27017/mongoadvisor
+MONGO_DB=mongoadvisor
+```
+
+Run `npm run indexes:ensure` after the user can connect. The same `readWrite`
+on `mongoadvisor` scope is what the Atlas `--preset backend` user receives in
+[step 1](#1-create-the-backend-application-user-scram).
+
+---
+
+## Atlas bootstrap prerequisites
+
+When using **Atlas** for the app DB and monitored clusters, you also need:
+
 - Atlas project IDs for the **backend** project (where the MongoAdvisor app DB
   lives) and each **monitored** workload project.
 - The backend Atlas cluster reachable for `MONGO_URI`.

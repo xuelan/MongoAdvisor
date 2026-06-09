@@ -44,6 +44,21 @@ to each source cluster (and optionally HTTPS to Atlas for slow-query logs).
 **Offline auditing** only needs the MongoAdvisor app DB and browser — cluster
 access happens earlier, on the machine where you run `getMongoData.js`.
 
+### Application database (where MongoAdvisor stores its data)
+
+Every mode needs a **MongoDB application database** (`MONGO_URI` / `MONGO_DB`)
+— separate from the clusters you monitor or audit. Pick one:
+
+| Option | Best for | Notes |
+| --- | --- | --- |
+| **[Atlas cluster](docs/setup.md#bootstrap-atlas)** | Production **live monitoring** | Sized per [retention guide](docs/retention.md#cluster-sizing-for-the-mongoadvisor-app-db); bootstrap users via [setup](docs/setup.md). |
+| **[Local Atlas via Docker](docs/setup.md#local-application-database-docker)** | **Offline reports**, local dev, no Atlas budget | Official [`mongodb/mongodb-atlas-local`](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-docker/) image on `localhost` — no cloud account for the app DB. |
+| **Self-managed MongoDB** | Teams with existing ops | Same roles as Atlas (`readWrite@mongoadvisor`); create users in `mongosh`. See [setup — self-managed](docs/setup.md#self-managed-application-database). |
+
+Offline auditing does **not** require a cloud Atlas cluster for the app DB.
+Live monitoring still needs network access to each **source** cluster you
+register; only the **storage** backend can be local Docker.
+
 ---
 
 ## Live monitoring
@@ -201,6 +216,7 @@ This README is a **5-minute onboarding** doc. The deep dives live under
 | ----------------------------------------------------- | ------------------------------------------------ |
 | **Live monitoring** — dashboard, charts, filters      | [docs/dashboard.md](docs/dashboard.md)           |
 | **Offline auditing** — `getMongoData.js` reports      | [docs/reports.md](docs/reports.md)               |
+| App DB: Atlas, local Docker, or self-managed          | [docs/setup.md](docs/setup.md#application-database-options) |
 | Atlas bootstrap, users & roles, env vars, encryption  | [docs/setup.md](docs/setup.md)                   |
 | Collector internals, dedupe, slow-query watermark     | [docs/collector.md](docs/collector.md)           |
 | Retention, hourly rollups, sizing, runbook            | [docs/retention.md](docs/retention.md)           |
@@ -275,11 +291,17 @@ slow-log ingestion without affecting any other collector.
 
 ## Quick Start
 
-For a **brand new** Atlas deployment, follow the six-step
-[Bootstrap (Atlas)](docs/setup.md#bootstrap-atlas) guide which creates the
-two database users and one Atlas API key MongoAdvisor needs.
+**Pick your app database first** ([options above](#application-database-where-mongoadvisor-stores-its-data)):
 
-When users and keys **already exist**:
+- **Atlas (live monitoring / production):** six-step
+  [Bootstrap (Atlas)](docs/setup.md#bootstrap-atlas) — app user, metrics reader,
+  monitoring API key.
+- **Local Docker (offline reports / try without Atlas):** start
+  [`mongodb/mongodb-atlas-local`](docs/setup.md#local-application-database-docker),
+  set `MONGO_URI=mongodb://127.0.0.1:27017/mongoadvisor?directConnection=true`,
+  skip cluster registration — go straight to [Reports](docs/reports.md#workflow).
+
+When the app DB is reachable:
 
 ```bash
 npm install
@@ -308,7 +330,7 @@ The bare minimum to start the application:
 
 | Variable         | Purpose                                                                                                            |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `MONGO_URI`      | Connection string for the **MongoAdvisor application** database. On Atlas, must include `authSource=admin`.       |
+| `MONGO_URI`      | Connection string for the **MongoAdvisor application** database. Atlas: include `authSource=admin`. Local Docker: `mongodb://127.0.0.1:27017/mongoadvisor?directConnection=true` (see [setup](docs/setup.md#local-application-database-docker)). |
 | `MONGO_DB`       | Application database name (default `mongoadvisor`).                                                                |
 | `ENCRYPTION_KEY` | 64 hex chars — encrypts stored cluster URIs and Atlas private keys in the app DB.                                  |
 | `PORT`           | Optional (default `3000`).                                                                                         |

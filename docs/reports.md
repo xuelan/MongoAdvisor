@@ -25,6 +25,38 @@ The same Node process serves both modes; only the **Reports** flow writes to
 `reports` and `reports_raw`. Live pollers and the dashboard use separate
 collections (`query_stats`, `slow_queries`, etc.).
 
+## Quick start without a cloud Atlas cluster
+
+You only need Node.js, Docker, and a local app database — **no Atlas project**
+for storage and **no live connection** to the cluster under audit.
+
+1. Start local MongoDB with the official
+   [`mongodb/mongodb-atlas-local`](https://www.mongodb.com/docs/atlas/cli/current/atlas-cli-deploy-docker/)
+   image (full steps:
+   [setup — Local application database (Docker)](setup.md#local-application-database-docker)):
+
+   ```bash
+   docker run --name mongoadvisor-local-db -p 27017:27017 \
+     -v mongoadvisor-local-data:/data/db \
+     -d mongodb/mongodb-atlas-local:latest
+   ```
+
+2. Configure `.env`:
+
+   ```env
+   MONGO_URI=mongodb://127.0.0.1:27017/mongoadvisor?directConnection=true
+   MONGO_DB=mongoadvisor
+   ENCRYPTION_KEY=<64 hex chars>
+   ```
+
+3. `npm install && npm run indexes:ensure && npm start`
+
+4. Follow [Workflow](#workflow) below. Use **Download HTML** to share results
+   without keeping MongoAdvisor or MongoDB running for the recipient.
+
+For production **live monitoring**, use a properly sized Atlas or self-managed
+app DB instead — see [setup — Application database options](setup.md#application-database-options).
+
 ## Workflow
 
 1. On each replica-set member, run:
